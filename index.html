@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-  <title>Top-Down Stealth (Pac-Style Map + Textures + Mobile Joystick + 128px Sprites)</title>
+  <title>Top-Down Stealth (Pac-Style Map + Mobile Joystick + Directional Spy + Gem Sprites)</title>
   <style>
     :root { color-scheme: dark; }
     body { margin:0; background:#0b0f14; color:#e6edf3; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
@@ -94,7 +94,7 @@
         Move: WASD / Arrow Keys / Joystick<br/>
         Patrols go to the end, <b>pause</b>, then <b>return</b> the same path.<br/>
         Guards chase only after spotting you; they give up after losing line-of-sight.<br/>
-        <b>Score only comes from collecting power-ups.</b>
+        <b>Score only comes from collecting gems.</b>
       </div>
     </div>
   </div>
@@ -135,7 +135,7 @@
   // =============================
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d");
-  ctx.imageSmoothingEnabled = true; // high-detail sprites look better with smoothing on
+  ctx.imageSmoothingEnabled = true; // better for high-detail sprites
 
   const UI = {
     loading: document.getElementById("loading"),
@@ -165,9 +165,9 @@
 
   const GAME_CFG = { targetScore: 150, timeLimit: 75, maxHP: 100 };
 
-  // Keep collision small so it fits corridors; draw sprite bigger for visuals.
+  // collision stays small; visuals can be larger
   const PLAYER_CFG = {
-    radius: 12,         // collision (24x24)
+    radius: 12,
     speed: 175,
     damageGrace: 0.10,
   };
@@ -175,21 +175,16 @@
   const GUARD_CFG = {
     radius: 12,
     patrolSpeed: 95,
-
-    // Slightly slower than spy while chasing:
-    chaseSpeed: 160,    // < 175
-
+    chaseSpeed: 160,         // slightly slower than spy
     visionRange: 220,
     coneHalfAngle: Math.PI / 7,
     dps: 26,
     loseSightGrace: 1.2,
     searchDuration: 2.0,
     turnSmoothing: 10,
-
     endPause: 1.1,
     startPause: 0.6,
     arriveEps: 6,
-
     stuckSeconds: 0.45,
     stuckMoveEps: 0.25,
   };
@@ -202,18 +197,27 @@
     minSpawnDistFromPlayer: 2.5 * TILE,
   };
 
-  // =============================
-  // Sprite setup (recommended)
-  // - Your source images are 128x128
-  // - We DRAW them at ~56px so they fit corridors visually
-  // =============================
+  // Sprite sizing
   const SPRITE = {
-    sourceSize: 128,
-    drawSize: 56, // <- tweak: 48 to 64 recommended
+    drawSize: 56, // spy/guard draw size (source can be 128x128)
   };
 
-  // Spy files (compass directions)
-  // Expect in /assets: spyn.png, spys.png, spyw.png, spye.png, spynw.png, spyne.png, spysw.png, spyse.png
+  // Gem draw sizing (your gems are 32x32 sources)
+  const GEM_DRAW = {
+    size: 28,
+    collectSize: 40,
+    collectTTL: 0.30,
+  };
+
+  // =============================
+  // Assets (paths expected in /assets)
+  // =============================
+  const ASSETS = {
+    floor: "assets/floortexture.png",
+    wall:  "assets/walltexture.png",
+    guard: "assets/guard.png", // optional; will fallback to circles if missing
+  };
+
   const SPY_FILES = {
     n:  "assets/spyn.png",
     ne: "assets/spyne.png",
@@ -225,14 +229,11 @@
     nw: "assets/spynw.png",
   };
 
-  // Guards: if you have one guard sprite, name it guard.png.
-  // If you ALSO have direction variants later, you can extend this similarly.
-  const GUARD_FILE = "assets/guard.png";
-
-  // Textures (tile sized, but can be any resolution; they'll be scaled)
-  const ASSETS = {
-    floor: "assets/floortexture.png",
-    wall:  "assets/walltexture.png",
+  const GEM_FILES = {
+    10: "assets/gem10.png",
+    20: "assets/gem20.png",
+    50: "assets/gem50.png",
+    collect: "assets/gemcollect.png",
   };
 
   function loadImage(src) {
@@ -247,8 +248,15 @@
   // Loaded images
   let floorImg, wallImg;
   let floorPattern = null;
-  const spySprites = {}; // key -> Image
+
+  const spySprites = {};      // key -> Image
   let guardSprite = null;
+
+  const gemSprites = {};      // {10: Image, 20: Image, 50: Image}
+  let gemCollectSprite = null;
+
+  // collect animation instances
+  let collectBursts = [];
 
   // =============================
   // Canvas sizing
@@ -311,7 +319,7 @@
   function resetJoystick() {
     joystick.active = false; joystick.id = null;
     joystick.vx = 0; joystick.vy = 0;
-    UI.joyKnob.style.transform = `translate(0px, 0px)`;
+    if (UI.joyKnob) UI.joyKnob.style.transform = `translate(0px, 0px)`;
   }
 
   if (UI.joy) {
@@ -365,15 +373,11 @@
     return norm(x, y);
   }
 
-  // Direction key from movement vector (8-way)
   function dirKeyFromVector(vx, vy, fallbackKey="s") {
     const mag = Math.hypot(vx, vy);
     if (mag < 0.02) return fallbackKey;
-
-    const a = Math.atan2(vy, vx); // -PI..PI, 0 = east
-    // Map to 8 dirs: E, NE, N, NW, W, SW, S, SE
+    const a = Math.atan2(vy, vx); // 0 = east
     const oct = Math.round(8 * a / (2 * Math.PI) + 8) % 8;
-    // order for oct indexes (starting at E)
     const keys = ["e","ne","n","nw","w","sw","s","se"];
     return keys[oct];
   }
@@ -524,7 +528,7 @@
   // =============================
   // Map / Collision / LOS
   // =============================
-  let map = null;
+  let map = null; // 1 wall, 0 floor
 
   const isWallTile = (tx, ty) => {
     if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return true;
@@ -686,17 +690,15 @@
     return {
       x, y,
       radius: GUARD_CFG.radius,
-      state: "PATROL", // PATROL | PAUSE_END | PAUSE_START | CHASE | SEARCH
+      state: "PATROL",
       waypoints,
       wpIndex: 0,
       forward: true,
       pauseTimer: 0,
-
       dirX: 1, dirY: 0,
       lastSeenX: x, lastSeenY: y,
       timeSinceSeen: 999,
       searchTimer: 0,
-
       stuckTime: 0,
       lastX: x,
       lastY: y,
@@ -713,10 +715,8 @@
 
     if (g.stuckTime > GUARD_CFG.stuckSeconds) {
       g.stuckTime = 0;
-
-      if (g.state === "PATROL") {
-        stepPatrolIndex(g);
-      } else {
+      if (g.state === "PATROL") stepPatrolIndex(g);
+      else {
         const t = performance.now() * 0.001;
         g.dirX = Math.cos(t * 3.0);
         g.dirY = Math.sin(t * 3.0);
@@ -883,7 +883,7 @@
   }
 
   // =============================
-  // Game Update
+  // Gameplay Update
   // =============================
   function updatePlayer(dt) {
     const mv = getMoveVector();
@@ -891,7 +891,7 @@
     player.y += mv.y * player.speed * dt;
     resolveCircleVsMap(player);
 
-    // Track facing direction based on movement (8-way)
+    // 8-way facing for directional spy sprites
     const key = dirKeyFromVector(mv.x, mv.y, player.facing || "s");
     player.facing = key;
   }
@@ -910,11 +910,23 @@
 
       if (dist2(p.x,p.y, player.x,player.y) <= POWERUP_CFG.pickupRadius**2) {
         player.score += p.points;
+
+        // collect burst animation
+        collectBursts.push({ x: p.x, y: p.y, ttl: GEM_DRAW.collectTTL });
+
         addFloater(p.x, p.y - 10, `+${p.points}`);
         UI.hud.classList.add("flash");
         setTimeout(() => UI.hud.classList.remove("flash"), 120);
+
         powerups.splice(i,1);
       }
+    }
+  }
+
+  function updateCollectBursts(dt) {
+    for (let i = collectBursts.length - 1; i >= 0; i--) {
+      collectBursts[i].ttl -= dt;
+      if (collectBursts[i].ttl <= 0) collectBursts.splice(i, 1);
     }
   }
 
@@ -983,6 +995,53 @@
     ctx.drawImage(img, x - size/2, y - size/2, size, size);
   }
 
+  function drawPowerups() {
+    for (const p of powerups) {
+      const img = gemSprites[p.points];
+
+      const lifeRatio = clamp(p.ttl / POWERUP_CFG.ttl, 0, 1);
+      const pulse = 0.85 + 0.15 * Math.sin((POWERUP_CFG.ttl - p.ttl) * 7);
+
+      ctx.save();
+      ctx.globalAlpha = pulse;
+
+      if (img) {
+        drawSpriteCentered(img, p.x, p.y, GEM_DRAW.size);
+      } else {
+        // fallback
+        ctx.beginPath();
+        ctx.fillStyle = "#a5d6ff";
+        ctx.arc(p.x, p.y, 9, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // countdown ring
+      ctx.globalAlpha = 0.45;
+      ctx.strokeStyle = "#e6edf3";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 16, -Math.PI/2, -Math.PI/2 + lifeRatio * Math.PI * 2);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+  }
+
+  function drawCollectBursts() {
+    if (!gemCollectSprite) return;
+
+    for (const b of collectBursts) {
+      const t = 1 - (b.ttl / GEM_DRAW.collectTTL);
+      const size = lerp(GEM_DRAW.collectSize * 0.7, GEM_DRAW.collectSize * 1.15, t);
+      const alpha = 1 - t;
+
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      drawSpriteCentered(gemCollectSprite, b.x, b.y, size);
+      ctx.restore();
+    }
+  }
+
   function drawGuard(g) {
     // Vision cone
     ctx.save();
@@ -997,10 +1056,8 @@
     ctx.fill();
     ctx.restore();
 
-    // Guard sprite (fallback to circle if missing)
-    if (guardSprite) {
-      drawSpriteCentered(guardSprite, g.x, g.y, SPRITE.drawSize);
-    } else {
+    if (guardSprite) drawSpriteCentered(guardSprite, g.x, g.y, SPRITE.drawSize);
+    else {
       ctx.beginPath();
       ctx.fillStyle = (g.state === "CHASE") ? "#ff7b72" : "#c9d1d9";
       ctx.arc(g.x, g.y, g.radius, 0, Math.PI*2);
@@ -1011,50 +1068,12 @@
   function drawPlayer() {
     const key = player.facing || "s";
     const img = spySprites[key];
-
-    // Spy sprite (fallback to circle if missing)
-    if (img) {
-      drawSpriteCentered(img, player.x, player.y, SPRITE.drawSize);
-    } else {
+    if (img) drawSpriteCentered(img, player.x, player.y, SPRITE.drawSize);
+    else {
       ctx.beginPath();
       ctx.fillStyle = "#7ee787";
       ctx.arc(player.x, player.y, player.radius, 0, Math.PI*2);
       ctx.fill();
-    }
-  }
-
-  function drawPowerups() {
-    for (const p of powerups) {
-      let c = "#a5d6ff";
-      if (p.points === 20) c = "#ffa657";
-      if (p.points === 50) c = "#d2a8ff";
-
-      const lifeRatio = clamp(p.ttl / POWERUP_CFG.ttl, 0, 1);
-      const pulse = 0.75 + 0.25 * Math.sin((POWERUP_CFG.ttl - p.ttl) * 7);
-
-      ctx.save();
-      ctx.globalAlpha = 0.95 * pulse;
-
-      ctx.beginPath();
-      ctx.fillStyle = c;
-      ctx.arc(p.x, p.y, 9, 0, Math.PI*2);
-      ctx.fill();
-
-      ctx.globalAlpha = 0.35;
-      ctx.strokeStyle = c;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 14, -Math.PI/2, -Math.PI/2 + lifeRatio * Math.PI*2);
-      ctx.stroke();
-
-      ctx.globalAlpha = 0.85;
-      ctx.fillStyle = "#0b0f14";
-      ctx.font = "bold 11px system-ui";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(String(p.points), p.x, p.y);
-
-      ctx.restore();
     }
   }
 
@@ -1102,6 +1121,7 @@
     beginWorldRender();
     drawMapTextured();
     drawPowerups();
+    drawCollectBursts();
     for (const g of guards) drawGuard(g);
     drawPlayer();
     drawFloaters();
@@ -1137,7 +1157,7 @@
       hp: GAME_CFG.maxHP,
       score: 0,
       coneContact: 0,
-      facing: "s", // default facing
+      facing: "s",
     };
     resolveCircleVsMap(player);
 
@@ -1179,6 +1199,8 @@
 
     powerups = [];
     floaters = [];
+    collectBursts = [];
+
     for (let i = 0; i < POWERUP_CFG.maxOnMap; i++) spawnPowerup(true);
     powerupSpawnTimer = POWERUP_CFG.spawnInterval * 0.6;
 
@@ -1204,7 +1226,9 @@
 
       updatePlayer(dt);
       for (const g of guards) updateGuard(g, dt);
+
       updatePowerups(dt);
+      updateCollectBursts(dt);
       updateFloaters(dt);
       updateDamage(dt);
 
@@ -1217,70 +1241,56 @@
   }
 
   // =============================
-  // Boot (load textures + spy directional sprites)
+  // Boot (load textures + spy directional sprites + gems)
   // =============================
   async function boot() {
     sizeCanvasForDevice();
 
     try {
-      const spyKeys = Object.keys(SPY_FILES);
-      const spyLoads = spyKeys.map(k => loadImage(SPY_FILES[k]).then(img => (spySprites[k] = img)));
-
-      [floorImg, wallImg, guardSprite] = await Promise.all([
+      // core textures
+      [floorImg, wallImg] = await Promise.all([
         loadImage(ASSETS.floor),
         loadImage(ASSETS.wall),
-        loadImage(GUARD_FILE).catch(() => null), // allow missing guard sprite
       ]);
 
-      await Promise.all(spyLoads); // ensure spy sprites loaded
-
       floorPattern = ctx.createPattern(floorImg, "repeat");
+
+      // spy directional sprites
+      const spyKeys = Object.keys(SPY_FILES);
+      await Promise.all(spyKeys.map(k =>
+        loadImage(SPY_FILES[k]).then(img => spySprites[k] = img)
+      ));
+
+      // guard sprite is optional
+      guardSprite = await loadImage(ASSETS.guard).catch(() => null);
+
+      // gem sprites
+      await Promise.all([
+        loadImage(GEM_FILES[10]).then(img => gemSprites[10] = img),
+        loadImage(GEM_FILES[20]).then(img => gemSprites[20] = img),
+        loadImage(GEM_FILES[50]).then(img => gemSprites[50] = img),
+        loadImage(GEM_FILES.collect).then(img => gemCollectSprite = img),
+      ]);
 
       UI.loading.style.display = "none";
       restart();
       requestAnimationFrame(tick);
     } catch (err) {
       UI.loading.textContent =
-        "Could not load images. Check file names/paths in /assets:\n" +
+        "Could not load images. Confirm these exist in /assets:\n" +
         "floortexture.png, walltexture.png\n" +
         "spyn.png, spyne.png, spye.png, spyse.png, spys.png, spysw.png, spyw.png, spynw.png\n" +
+        "gem10.png, gem20.png, gem50.png, gemcollect.png\n" +
         "(optional) guard.png\n\n" +
-        "Also: serve the folder (GitHub Pages / local server) instead of opening as file://";
+        "Tip: run via GitHub Pages / local server, not file://";
       console.error(err);
     }
   }
 
   // =============================
-  // The remaining required functions
-  // =============================
-  function updateDamage(dt) {
-    let seenNow = false;
-    for (const g of guards) { if (canGuardSeePlayer(g)) { seenNow = true; break; } }
-
-    if (seenNow) {
-      player.coneContact += dt;
-      if (player.coneContact >= PLAYER_CFG.damageGrace) {
-        player.hp -= GUARD_CFG.dps * dt;
-        canvas.classList.add("flash");
-        setTimeout(() => canvas.classList.remove("flash"), 90);
-      }
-    } else {
-      player.coneContact = 0;
-    }
-    player.hp = clamp(player.hp, 0, GAME_CFG.maxHP);
-  }
-
-  function checkEndConditions() {
-    if (player.score >= GAME_CFG.targetScore) { gameOver = true; win = true; }
-    else if (gameTime <= 0) { gameOver = true; win = false; }
-    else if (player.hp <= 0) { gameOver = true; win = false; }
-  }
-
-  // =============================
-  // START
+  // Start
   // =============================
   boot();
-
 })();
 </script>
 </body>
