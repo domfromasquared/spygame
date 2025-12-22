@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Top-Down Stealth (Cave Map + Patrol Pause + Return)</title>
+  <title>Top-Down Stealth (Pac-Man Style Mazes + Mobile Joystick)</title>
   <style>
     :root { color-scheme: dark; }
     body { margin:0; background:#0b0f14; color:#e6edf3; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
@@ -56,7 +56,7 @@
 
       <div class="row" style="margin-top:10px;"><div>Power-ups on map</div><div id="pcount">0</div></div>
 
-      <button id="restart">Restart (new cave map)</button>
+      <button id="restart">Restart (new Pac-Man maze)</button>
 
       <div class="joystickWrap">
         <div class="joystickTitle">Mobile Joystick</div>
@@ -68,7 +68,7 @@
 
       <div class="hint">
         Move: WASD / Arrow Keys / Joystick<br/>
-        Guard patrols go to the end, <b>pause</b>, then <b>return</b> the same route.<br/>
+        Patrols go to the end, <b>pause</b>, then <b>return</b> the same path.<br/>
         Guards chase only after spotting you; they give up after losing line-of-sight.<br/>
         <b>Score only comes from collecting power-ups.</b>
       </div>
@@ -94,13 +94,6 @@
   const lerp = (a, b, t) => a + (b - a) * t;
   const randInt = (a, b) => Math.floor(a + Math.random() * (b - a + 1));
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
-  const shuffle = (arr) => {
-    for (let i = arr.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [arr[i], arr[j]] = [arr[j], arr[i]];
-    }
-    return arr;
-  };
 
   // =============================
   // Canvas / UI
@@ -150,10 +143,10 @@
     searchDuration: 2.0,
     turnSmoothing: 10,
 
-    // Patrol behavior: go to end, pause, return, pause, repeat
-    endPause: 1.1,     // seconds pause at end of route
-    startPause: 0.6,   // seconds pause at start after returning
-    arriveEps: 6,      // px threshold to count waypoint reached
+    // Patrol: end pause -> reverse -> start pause
+    endPause: 1.1,
+    startPause: 0.6,
+    arriveEps: 6,
   };
 
   const POWERUP_CFG = {
@@ -171,12 +164,7 @@
   window.addEventListener("keydown", (e) => keys.add(e.key.toLowerCase()));
   window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
 
-  const joystick = {
-    active: false,
-    id: null,
-    vx: 0, vy: 0,
-    max: 50,
-  };
+  const joystick = { active:false, id:null, vx:0, vy:0, max:50 };
 
   function setJoystickVectorFromPointer(clientX, clientY) {
     const rect = UI.joy.getBoundingClientRect();
@@ -187,21 +175,19 @@
     const dy = clientY - cy;
     const d = Math.hypot(dx, dy) || 1;
 
-    const max = joystick.max;
-    const k = Math.min(1, max / d);
+    const k = Math.min(1, joystick.max / d);
     const nx = dx * k;
     const ny = dy * k;
 
-    joystick.vx = clamp(nx / max, -1, 1);
-    joystick.vy = clamp(ny / max, -1, 1);
-
+    joystick.vx = clamp(nx / joystick.max, -1, 1);
+    joystick.vy = clamp(ny / joystick.max, -1, 1);
     UI.joyKnob.style.transform = `translate(${nx}px, ${ny}px)`;
   }
 
   function resetJoystick() {
-    joystick.vx = 0; joystick.vy = 0;
     joystick.active = false;
     joystick.id = null;
+    joystick.vx = 0; joystick.vy = 0;
     UI.joyKnob.style.transform = `translate(0px, 0px)`;
   }
 
@@ -243,7 +229,6 @@
       const mag = clamp(Math.hypot(joystick.vx, joystick.vy), 0, 1);
       return { x: m.x * mag, y: m.y * mag };
     }
-
     if (kActive && jActive) {
       const kb = norm(x, y);
       const blended = { x: kb.x + joystick.vx * 0.6, y: kb.y + joystick.vy * 0.6 };
@@ -251,169 +236,171 @@
       const mag = clamp(Math.hypot(blended.x, blended.y), 0, 1);
       return { x: m.x * mag, y: m.y * mag };
     }
-
     if (!kActive) return { x: 0, y: 0 };
     return norm(x, y);
   }
 
   // =============================
-  // Cave Map Generation (complex interconnected cave system)
-  // - Cellular automata to form caves
-  // - Then enforce connectivity by keeping only the largest region
-  // - Then "punch" extra tunnels to increase interconnectivity
-  // Result: lots of paths and openings, fully reachable.
+  // Pac-Man style maze generation
+  // 1 = wall, 0 = floor
+  // - Start with all walls + border walls
+  // - Carve grid corridors (orthogonal)
+  // - Mirror left -> right for classic symmetry vibe
+  // - Sprinkle “blocks” (wall rectangles) while preserving connectivity
+  // - Ensure fully connected walkable space
   // =============================
-  let map = null; // 1 wall, 0 floor
+  let map = null;
   const isWallTile = (tx, ty) => {
     if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return true;
     return map[ty][tx] === 1;
   };
   const worldToTile = (x, y) => ({ tx: Math.floor(x / TILE), ty: Math.floor(y / TILE) });
 
-  function makeRandomCaveBase(fillProb = 0.44) {
+  function emptyWalls() {
     const m = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(1));
-    for (let y = 0; y < MAP_H; y++) {
-      for (let x = 0; x < MAP_W; x++) {
-        if (x === 0 || y === 0 || x === MAP_W-1 || y === MAP_H-1) {
-          m[y][x] = 1;
-        } else {
-          m[y][x] = (Math.random() < fillProb) ? 1 : 0;
-        }
-      }
-    }
+    // border is walls already
     return m;
   }
 
-  function countWallNeighbors(m, x, y) {
-    let c = 0;
-    for (let oy = -1; oy <= 1; oy++) {
-      for (let ox = -1; ox <= 1; ox++) {
-        if (ox === 0 && oy === 0) continue;
-        const nx = x + ox, ny = y + oy;
-        if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) { c++; continue; }
-        if (m[ny][nx] === 1) c++;
+  function carveCell(m, x, y) {
+    if (x <= 0 || y <= 0 || x >= MAP_W-1 || y >= MAP_H-1) return;
+    m[y][x] = 0;
+  }
+
+  function carveHorizontal(m, y, x0, x1) {
+    for (let x = x0; x <= x1; x++) carveCell(m, x, y);
+  }
+
+  function carveVertical(m, x, y0, y1) {
+    for (let y = y0; y <= y1; y++) carveCell(m, x, y);
+  }
+
+  function mirrorLeftToRight(m) {
+    const mid = Math.floor(MAP_W / 2);
+    for (let y = 0; y < MAP_H; y++) {
+      for (let x = 0; x < mid; x++) {
+        const mx = MAP_W - 1 - x;
+        m[y][mx] = m[y][x];
       }
     }
+  }
+
+  function countFloor(m) {
+    let c = 0;
+    for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) if (m[y][x] === 0) c++;
     return c;
   }
 
-  function smoothCave(m, steps = 5) {
-    for (let s = 0; s < steps; s++) {
-      const next = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(1));
-      for (let y = 0; y < MAP_H; y++) {
-        for (let x = 0; x < MAP_W; x++) {
-          if (x === 0 || y === 0 || x === MAP_W-1 || y === MAP_H-1) {
-            next[y][x] = 1;
-            continue;
-          }
-          const walls = countWallNeighbors(m, x, y);
-          // Rule: more walls around => becomes wall; fewer => becomes floor
-          next[y][x] = (walls >= 5) ? 1 : 0;
-        }
-      }
-      m = next;
-    }
-    return m;
-  }
-
-  function floodFillRegion(m, sx, sy, visited) {
-    const tiles = [];
-    const q = [{ x: sx, y: sy }];
-    visited[sy][sx] = true;
+  function bfsCount(m, sx, sy) {
+    if (m[sy][sx] === 1) return 0;
+    const vis = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(false));
+    const q = [{x:sx,y:sy}];
+    vis[sy][sx] = true;
+    let count = 1;
     const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
 
     while (q.length) {
       const p = q.shift();
-      tiles.push(p);
       for (const d of dirs) {
         const nx = p.x + d.x, ny = p.y + d.y;
         if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) continue;
-        if (visited[ny][nx]) continue;
+        if (vis[ny][nx]) continue;
         if (m[ny][nx] === 1) continue;
-        visited[ny][nx] = true;
-        q.push({ x: nx, y: ny });
+        vis[ny][nx] = true;
+        count++;
+        q.push({x:nx,y:ny});
       }
     }
-    return tiles;
+    return count;
   }
 
-  function keepLargestFloorRegion(m) {
-    const visited = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(false));
-    let best = [];
+  function findAnyFloor(m) {
+    for (let y = 1; y < MAP_H-1; y++) for (let x = 1; x < MAP_W-1; x++) if (m[y][x] === 0) return {x,y};
+    return { x: 1, y: 1 };
+  }
 
-    for (let y = 1; y < MAP_H-1; y++) {
-      for (let x = 1; x < MAP_W-1; x++) {
-        if (visited[y][x]) continue;
-        if (m[y][x] === 1) continue;
-        const region = floodFillRegion(m, x, y, visited);
-        if (region.length > best.length) best = region;
-      }
-    }
+  function isFullyConnected(m) {
+    const floor = countFloor(m);
+    if (floor === 0) return false;
+    const s = findAnyFloor(m);
+    const reached = bfsCount(m, s.x, s.y);
+    return reached === floor;
+  }
 
-    // Turn everything else into walls
-    const keep = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(false));
-    for (const t of best) keep[t.y][t.x] = true;
-
-    for (let y = 0; y < MAP_H; y++) {
-      for (let x = 0; x < MAP_W; x++) {
-        if (x === 0 || y === 0 || x === MAP_W-1 || y === MAP_H-1) {
+  function placeWallRect(m, x0, y0, w, h) {
+    const changed = [];
+    for (let y = y0; y < y0 + h; y++) {
+      for (let x = x0; x < x0 + w; x++) {
+        if (x <= 0 || y <= 0 || x >= MAP_W-1 || y >= MAP_H-1) continue;
+        if (m[y][x] === 0) {
           m[y][x] = 1;
-        } else {
-          m[y][x] = keep[y][x] ? 0 : 1;
+          changed.push({x,y});
         }
       }
     }
-    return m;
+    return changed;
   }
+  function undo(m, changed) { for (const c of changed) m[c.y][c.x] = 0; }
 
-  function carveLine(m, ax, ay, bx, by, radius = 1) {
-    // Carve a simple “tunnel” along a line in tile space
-    const dx = bx - ax;
-    const dy = by - ay;
-    const steps = Math.max(Math.abs(dx), Math.abs(dy)) || 1;
-    for (let i = 0; i <= steps; i++) {
-      const t = i / steps;
-      const x = Math.round(ax + dx * t);
-      const y = Math.round(ay + dy * t);
-      for (let oy = -radius; oy <= radius; oy++) {
-        for (let ox = -radius; ox <= radius; ox++) {
-          const nx = x + ox, ny = y + oy;
-          if (nx <= 0 || ny <= 0 || nx >= MAP_W-1 || ny >= MAP_H-1) continue;
-          m[ny][nx] = 0;
+  function generatePacmanMaze() {
+    // 1) start walls
+    let m = emptyWalls();
+
+    // 2) carve a backbone of corridors (grid-like)
+    // horizontal lanes
+    const lanesY = [2, 4, 6, 8, 10, 12, 14, 16].filter(y => y < MAP_H-1);
+    for (const y of lanesY) carveHorizontal(m, y, 2, MAP_W-3);
+
+    // vertical lanes (left half; mirrored later)
+    const lanesX = [2, 4, 6, 8, 10, 12].filter(x => x < Math.floor(MAP_W/2));
+    for (const x of lanesX) carveVertical(m, x, 2, MAP_H-3);
+
+    // 3) add “gaps” to make corridors chunky / pac-man like blocks
+    // (we re-add walls into the carved space as blocky islands)
+    // Do this on left half only, then mirror.
+    for (let i = 0; i < 22; i++) {
+      const w = randInt(2, 4);
+      const h = randInt(1, 3);
+      const x0 = randInt(2, Math.floor(MAP_W/2) - 2 - w);
+      const y0 = randInt(2, MAP_H - 2 - h);
+
+      // Avoid completely sealing lane intersections: bias away from even/even “junction cores”
+      if ((x0 % 2 === 0) && (y0 % 2 === 0) && Math.random() < 0.6) continue;
+
+      const changed = placeWallRect(m, x0, y0, w, h);
+      if (changed.length === 0) continue;
+
+      // Mirror the same rect for symmetry before connectivity check
+      // (apply mirror by copying later, but for correctness now, we do a quick mirror write)
+      const mid = Math.floor(MAP_W / 2);
+      for (const c of changed) {
+        const mx = MAP_W - 1 - c.x;
+        if (mx > 0 && mx < MAP_W-1) m[c.y][mx] = 1;
+      }
+
+      // Must remain connected
+      if (!isFullyConnected(m)) {
+        // undo left + mirrored
+        for (const c of changed) {
+          m[c.y][c.x] = 0;
+          const mx = MAP_W - 1 - c.x;
+          if (mx > 0 && mx < MAP_W-1) m[c.y][mx] = 0;
         }
       }
     }
-  }
 
-  function pickRandomFloorTiles(m, count = 8) {
-    const floors = [];
-    for (let y = 1; y < MAP_H-1; y++) for (let x = 1; x < MAP_W-1; x++) if (m[y][x] === 0) floors.push({x,y});
-    shuffle(floors);
-    return floors.slice(0, Math.min(count, floors.length));
-  }
+    // 4) ensure symmetry (hard mirror pass)
+    mirrorLeftToRight(m);
 
-  function punchExtraInterconnections(m) {
-    // Make the cave “more interconnected” by carving a handful of tunnels
-    // between random floor points.
-    const points = pickRandomFloorTiles(m, 10);
-    for (let i = 0; i < points.length - 1; i++) {
-      const a = points[i];
-      const b = points[i + 1];
-      // slightly thicker tunnels = more openings/loops
-      carveLine(m, a.x, a.y, b.x, b.y, 1);
-    }
-    return m;
-  }
+    // 5) add a couple extra “tunnels” (long corridors) to feel like pac-man wrap-ish lanes
+    // (Not actual wrap; just long straight runs.)
+    carveHorizontal(m, 9, 2, MAP_W-3);
+    carveVertical(m, Math.floor(MAP_W/2), 2, MAP_H-3); // center spine
 
-  function generateCaveMap() {
-    let m = makeRandomCaveBase(0.44);
-    m = smoothCave(m, 5);
-    m = keepLargestFloorRegion(m);
-    m = punchExtraInterconnections(m);
-    // One more light smooth to remove harsh single tiles, keep openings
-    m = smoothCave(m, 1);
-    // Re-keep largest region after modifications
-    m = keepLargestFloorRegion(m);
+    // 6) final: if somehow disconnected, re-generate (rare)
+    // Keep it deterministic enough: try a few times.
+    if (!isFullyConnected(m)) return generatePacmanMaze();
+
     return m;
   }
 
@@ -459,7 +446,7 @@
   }
 
   // =============================
-  // LOS
+  // LOS (simple sampling)
   // =============================
   function hasLineOfSight(ax, ay, bx, by) {
     const dx = bx - ax, dy = by - ay;
@@ -479,7 +466,7 @@
   }
 
   // =============================
-  // Reachability (for spawns)
+  // Reachability (for spawns / powerups)
   // =============================
   function computeReachableFrom(startX, startY) {
     const start = worldToTile(startX, startY);
@@ -511,20 +498,24 @@
     return { reachable, tiles };
   }
 
-  function findSafeFloorSpawn(radius) {
-    // Pick a floor tile and ensure circle doesn't overlap walls
-    const floors = [];
-    for (let y = 1; y < MAP_H-1; y++) for (let x = 1; x < MAP_W-1; x++) if (map[y][x] === 0) floors.push({x,y});
-    shuffle(floors);
-
-    for (let i = 0; i < floors.length; i++) {
-      const t = floors[i];
-      const x = (t.x + 0.5) * TILE;
-      const y = (t.y + 0.5) * TILE;
-      if (isSafeCirclePosition(x, y, radius)) return { x, y, tx: t.x, ty: t.y };
+  function findSafeFloorSpawn(radius, prefer = { tx: 2, ty: 2 }) {
+    // Prefer near a spot, fallback to random floors.
+    const candidates = [];
+    for (let y = 1; y < MAP_H-1; y++) for (let x = 1; x < MAP_W-1; x++) {
+      if (map[y][x] !== 0) continue;
+      candidates.push({ tx:x, ty:y, d: Math.abs(x - prefer.tx) + Math.abs(y - prefer.ty) });
     }
-    // fallback
-    return { x: 2.5*TILE, y: 2.5*TILE, tx: 2, ty: 2 };
+    candidates.sort((a,b) => a.d - b.d);
+
+    for (let i = 0; i < Math.min(200, candidates.length); i++) {
+      const t = candidates[i];
+      const x = (t.tx + 0.5) * TILE;
+      const y = (t.ty + 0.5) * TILE;
+      if (isSafeCirclePosition(x, y, radius)) return { x, y, tx:t.tx, ty:t.ty };
+    }
+
+    const t = pick(candidates);
+    return { x: (t.tx + 0.5)*TILE, y: (t.ty + 0.5)*TILE, tx:t.tx, ty:t.ty };
   }
 
   // =============================
@@ -540,7 +531,7 @@
       state: "PATROL", // PATROL | PAUSE_END | PAUSE_START | CHASE | SEARCH
       waypoints,
       wpIndex: 0,
-      forward: true,   // forward along path until end, then reverse
+      forward: true,
       pauseTimer: 0,
 
       dirX: 1, dirY: 0,
@@ -562,10 +553,10 @@
   }
 
   // =============================
-  // Powerups
+  // Powerups: points only
   // =============================
   function randomReachablePosition() {
-    for (let i = 0; i < 160; i++) {
+    for (let i = 0; i < 180; i++) {
       const t = pick(REACH.tiles);
       const x = (t.tx + 0.5) * TILE;
       const y = (t.ty + 0.5) * TILE;
@@ -585,14 +576,14 @@
     return { x: (t.tx + 0.5) * TILE, y: (t.ty + 0.5) * TILE };
   }
 
-  function spawnPowerup(force = false) {
+  function spawnPowerup(force=false) {
     if (!force && powerups.length >= POWERUP_CFG.maxOnMap) return;
     const pos = randomReachablePosition();
     powerups.push({ x: pos.x, y: pos.y, ttl: POWERUP_CFG.ttl, points: randomPointsValue() });
   }
 
   // =============================
-  // Guard AI
+  // Guard AI (patrol end pause + reverse)
   // =============================
   function canGuardSeePlayer(g) {
     const vx = player.x - g.x;
@@ -620,52 +611,36 @@
 
     ent.dirX = lerp(ent.dirX, vx, clamp(GUARD_CFG.turnSmoothing * dt, 0, 1));
     ent.dirY = lerp(ent.dirY, vy, clamp(GUARD_CFG.turnSmoothing * dt, 0, 1));
-
     return d < GUARD_CFG.arriveEps;
-  }
-
-  function currentPatrolTarget(g) {
-    return g.waypoints[g.wpIndex];
   }
 
   function stepPatrolIndex(g) {
     if (g.forward) {
       if (g.wpIndex >= g.waypoints.length - 1) {
-        // reached end
         g.state = "PAUSE_END";
         g.pauseTimer = GUARD_CFG.endPause;
         g.forward = false;
-      } else {
-        g.wpIndex++;
-      }
+      } else g.wpIndex++;
     } else {
       if (g.wpIndex <= 0) {
-        // reached start
         g.state = "PAUSE_START";
         g.pauseTimer = GUARD_CFG.startPause;
         g.forward = true;
-      } else {
-        g.wpIndex--;
-      }
+      } else g.wpIndex--;
     }
   }
 
   function updateGuardPatrol(g, dt) {
     if (g.state === "PAUSE_END" || g.state === "PAUSE_START") {
       g.pauseTimer -= dt;
-      // Idle scanning while paused
       const t = performance.now() * 0.001;
       g.dirX = Math.cos(t * 1.2);
       g.dirY = Math.sin(t * 1.2);
-
-      if (g.pauseTimer <= 0) {
-        g.state = "PATROL";
-      }
+      if (g.pauseTimer <= 0) g.state = "PATROL";
       return;
     }
 
-    // PATROL
-    const wp = currentPatrolTarget(g);
+    const wp = g.waypoints[g.wpIndex];
     const reached = moveTowards(g, wp.x, wp.y, GUARD_CFG.patrolSpeed, dt);
     resolveCircleVsMap(g);
     if (reached) stepPatrolIndex(g);
@@ -673,10 +648,8 @@
 
   function updateGuard(g, dt) {
     const sees = canGuardSeePlayer(g);
-
     if (sees) {
-      g.lastSeenX = player.x;
-      g.lastSeenY = player.y;
+      g.lastSeenX = player.x; g.lastSeenY = player.y;
       g.timeSinceSeen = 0;
       if (g.state !== "CHASE") g.state = "CHASE";
     } else {
@@ -686,39 +659,28 @@
     if (g.state === "CHASE") {
       moveTowards(g, g.lastSeenX, g.lastSeenY, GUARD_CFG.chaseSpeed, dt);
       resolveCircleVsMap(g);
-
       if (g.timeSinceSeen > GUARD_CFG.loseSightGrace) {
         g.state = "SEARCH";
         g.searchTimer = GUARD_CFG.searchDuration;
       }
-    }
-    else if (g.state === "SEARCH") {
+    } else if (g.state === "SEARCH") {
       const atLast = moveTowards(g, g.lastSeenX, g.lastSeenY, GUARD_CFG.patrolSpeed, dt);
       resolveCircleVsMap(g);
-
       if (atLast) {
         g.searchTimer -= dt;
         const t = performance.now() * 0.001;
         g.dirX = Math.cos(t * 1.8);
         g.dirY = Math.sin(t * 1.8);
-        if (g.searchTimer <= 0) {
-          // return to patrol where it left off
-          g.state = "PATROL";
-        }
+        if (g.searchTimer <= 0) g.state = "PATROL";
       }
-    }
-    else {
-      // PATROL / PAUSE_END / PAUSE_START
+    } else {
       updateGuardPatrol(g, dt);
     }
   }
 
   // =============================
-  // Patrol route creation (cave-style)
-  // Create a route that “feels like” a cave patrol:
-  // - pick a start tile
-  // - random-walk on floor tiles to form a winding path
-  // - convert those tiles into smooth waypoint positions
+  // Patrol route: pick a long orthogonal path through corridors
+  // (Feels like Pac-Man ghost patrol lines)
   // =============================
   function neighborsFloor(tx, ty) {
     const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
@@ -726,51 +688,58 @@
     for (const d of dirs) {
       const nx = tx + d.x, ny = ty + d.y;
       if (nx <= 0 || ny <= 0 || nx >= MAP_W-1 || ny >= MAP_H-1) continue;
-      if (map[ny][nx] === 0) res.push({ tx: nx, ty: ny });
+      if (map[ny][nx] === 0) res.push({ tx:nx, ty:ny });
     }
     return res;
   }
 
-  function makePatrolRouteFromTile(startTx, startTy, steps = 40) {
+  function makeGridPatrolRoute(startTx, startTy, steps = 60) {
     let tx = startTx, ty = startTy;
-    const visited = new Set();
     const path = [{ tx, ty }];
-    visited.add(`${tx},${ty}`);
+    const visited = new Set([`${tx},${ty}`]);
 
     for (let i = 0; i < steps; i++) {
       const n = neighborsFloor(tx, ty);
       if (n.length === 0) break;
 
-      // Prefer unvisited neighbors to keep route wandering
+      // Prefer straight-ish movement: pick neighbor that continues direction if possible.
+      const prev = path.length >= 2 ? path[path.length-2] : null;
+      let preferred = null;
+      if (prev) {
+        const dx = tx - prev.tx;
+        const dy = ty - prev.ty;
+        preferred = n.find(p => (p.tx - tx) === dx && (p.ty - ty) === dy);
+      }
+
       const unvisited = n.filter(p => !visited.has(`${p.tx},${p.ty}`));
-      const next = (unvisited.length > 0 && Math.random() < 0.78) ? pick(unvisited) : pick(n);
+      let next = null;
+
+      if (preferred && Math.random() < 0.6) next = preferred;
+      else if (unvisited.length && Math.random() < 0.75) next = pick(unvisited);
+      else next = pick(n);
 
       tx = next.tx; ty = next.ty;
       path.push({ tx, ty });
       visited.add(`${tx},${ty}`);
     }
 
-    // Downsample into waypoints
+    // Downsample to waypoints
     const waypoints = [];
-    const stride = 6;
+    const stride = 7;
     for (let i = 0; i < path.length; i += stride) {
       const p = path[i];
-      waypoints.push({ x: (p.tx + 0.5) * TILE, y: (p.ty + 0.5) * TILE });
+      waypoints.push({ x:(p.tx+0.5)*TILE, y:(p.ty+0.5)*TILE });
     }
+    const last = path[path.length-1];
+    const lastWp = { x:(last.tx+0.5)*TILE, y:(last.ty+0.5)*TILE };
+    const tail = waypoints[waypoints.length-1];
+    if (!tail || Math.hypot(lastWp.x - tail.x, lastWp.y - tail.y) > TILE*0.5) waypoints.push(lastWp);
 
-    // Ensure last point is included for "end of path" pause
-    const last = path[path.length - 1];
-    const lastWp = { x: (last.tx + 0.5) * TILE, y: (last.ty + 0.5) * TILE };
-    const dx = lastWp.x - waypoints[waypoints.length - 1].x;
-    const dy = lastWp.y - waypoints[waypoints.length - 1].y;
-    if (Math.hypot(dx, dy) > TILE * 0.5) waypoints.push(lastWp);
-
-    // Minimum length
+    // Minimum
     if (waypoints.length < 3) {
-      waypoints.push({ x: (startTx + 1.5) * TILE, y: (startTy + 0.5) * TILE });
-      waypoints.push({ x: (startTx + 2.5) * TILE, y: (startTy + 0.5) * TILE });
+      waypoints.push({ x:(startTx+2.5)*TILE, y:(startTy+0.5)*TILE });
+      waypoints.push({ x:(startTx+2.5)*TILE, y:(startTy+3.5)*TILE });
     }
-
     return waypoints;
   }
 
@@ -794,14 +763,14 @@
     for (let i = powerups.length - 1; i >= 0; i--) {
       const p = powerups[i];
       p.ttl -= dt;
-      if (p.ttl <= 0) { powerups.splice(i, 1); continue; }
+      if (p.ttl <= 0) { powerups.splice(i,1); continue; }
 
-      if (dist2(p.x, p.y, player.x, player.y) <= POWERUP_CFG.pickupRadius ** 2) {
+      if (dist2(p.x,p.y, player.x,player.y) <= POWERUP_CFG.pickupRadius**2) {
         player.score += p.points;
         addFloater(p.x, p.y - 10, `+${p.points}`);
         UI.hud.classList.add("flash");
         setTimeout(() => UI.hud.classList.remove("flash"), 120);
-        powerups.splice(i, 1);
+        powerups.splice(i,1);
       }
     }
   }
@@ -811,15 +780,13 @@
       const f = floaters[i];
       f.ttl -= dt;
       f.y += f.vy * dt;
-      if (f.ttl <= 0) floaters.splice(i, 1);
+      if (f.ttl <= 0) floaters.splice(i,1);
     }
   }
 
   function updateDamage(dt) {
     let seenNow = false;
-    for (const g of guards) {
-      if (canGuardSeePlayer(g)) { seenNow = true; break; }
-    }
+    for (const g of guards) { if (canGuardSeePlayer(g)) { seenNow = true; break; } }
 
     if (seenNow) {
       player.coneContact += dt;
@@ -842,18 +809,25 @@
   }
 
   // =============================
-  // Rendering
+  // Rendering (Pac-Man vibe: crisp walls)
   // =============================
   function drawMap() {
+    // Floor
+    ctx.fillStyle = "#0f1621";
+    ctx.fillRect(0,0, canvas.width, canvas.height);
+
+    // Walls (blocky)
     for (let y = 0; y < MAP_H; y++) {
       for (let x = 0; x < MAP_W; x++) {
-        const t = map[y][x];
-        if (t === 1) {
-          ctx.fillStyle = "#1f2a37";
+        if (map[y][x] === 1) {
+          // slightly varied wall shading for depth
+          ctx.fillStyle = ((x+y) % 2 === 0) ? "#1f2a37" : "#202d3d";
           ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
-        } else {
-          ctx.fillStyle = "#0f1621";
-          ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
+
+          // inner outline to evoke arcade tiles
+          ctx.strokeStyle = "#2b3a50";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x*TILE + 0.5, y*TILE + 0.5, TILE - 1, TILE - 1);
         }
       }
     }
@@ -866,12 +840,9 @@
     ctx.fillStyle = (g.state === "CHASE") ? "#ff7b72" : "#79c0ff";
     const dir = norm(g.dirX, g.dirY);
     const a0 = Math.atan2(dir.y, dir.x);
-    const a1 = a0 - GUARD_CFG.coneHalfAngle;
-    const a2 = a0 + GUARD_CFG.coneHalfAngle;
-
     ctx.beginPath();
     ctx.moveTo(g.x, g.y);
-    ctx.arc(g.x, g.y, GUARD_CFG.visionRange, a1, a2);
+    ctx.arc(g.x, g.y, GUARD_CFG.visionRange, a0 - GUARD_CFG.coneHalfAngle, a0 + GUARD_CFG.coneHalfAngle);
     ctx.closePath();
     ctx.fill();
     ctx.restore();
@@ -975,7 +946,7 @@
     ctx.fillText(msg, canvas.width/2, canvas.height/2 + 18);
 
     ctx.font = "14px system-ui";
-    ctx.fillText("Press Restart to generate a new cave map.", canvas.width/2, canvas.height/2 + 42);
+    ctx.fillText("Press Restart to generate a new Pac-Man style maze.", canvas.width/2, canvas.height/2 + 42);
 
     ctx.restore();
   }
@@ -1005,13 +976,13 @@
   }
 
   // =============================
-  // Restart: new cave + safe spawns + patrol routes with pause+return
+  // Restart: new Pac-Man maze + safe spawns + patrols with pause+return
   // =============================
   function restart() {
-    map = generateCaveMap();
+    map = generatePacmanMaze();
 
-    // Player spawn: safe floor
-    const pSpawn = findSafeFloorSpawn(PLAYER_CFG.radius);
+    // Player spawn near top-left corridor region
+    const pSpawn = findSafeFloorSpawn(PLAYER_CFG.radius, { tx: 2, ty: 2 });
     player = {
       x: pSpawn.x,
       y: pSpawn.y,
@@ -1023,23 +994,21 @@
     };
     resolveCircleVsMap(player);
 
-    // Reachability for spawns and powerups (entire cave region is connected)
     REACH = computeReachableFrom(player.x, player.y);
 
-    // Guards: spawn on walkable tiles far from player
+    // Guards: spawn on walkable tiles away from player, ensure safe
     guards = [];
     const guardCount = 3;
     const used = [{ x: player.x, y: player.y }];
 
     for (let i = 0; i < guardCount; i++) {
-      // choose a guard tile far from player
-      let t = null;
-      for (let tries = 0; tries < 400; tries++) {
+      let chosen = null;
+      for (let tries = 0; tries < 600; tries++) {
         const cand = pick(REACH.tiles);
         const x = (cand.tx + 0.5) * TILE;
         const y = (cand.ty + 0.5) * TILE;
         if (!isSafeCirclePosition(x, y, GUARD_CFG.radius)) continue;
-        if (dist2(x, y, player.x, player.y) < (TILE * 6) ** 2) continue;
+        if (dist2(x, y, player.x, player.y) < (TILE * 7) ** 2) continue;
 
         let ok = true;
         for (const u of used) {
@@ -1047,19 +1016,25 @@
         }
         if (!ok) continue;
 
-        t = { tx: cand.tx, ty: cand.ty, x, y };
+        chosen = { tx: cand.tx, ty: cand.ty, x, y };
         break;
       }
-      if (!t) {
+      if (!chosen) {
         const cand = pick(REACH.tiles);
-        t = { tx: cand.tx, ty: cand.ty, x: (cand.tx + 0.5)*TILE, y: (cand.ty + 0.5)*TILE };
+        chosen = { tx: cand.tx, ty: cand.ty, x: (cand.tx+0.5)*TILE, y: (cand.ty+0.5)*TILE };
       }
 
-      // Build a cave-like patrol route from guard tile
-      const waypoints = makePatrolRouteFromTile(t.tx, t.ty, 44);
-
-      const g = makeGuard(t.x, t.y, waypoints);
+      const waypoints = makeGridPatrolRoute(chosen.tx, chosen.ty, 70);
+      const g = makeGuard(chosen.x, chosen.y, waypoints);
       resolveCircleVsMap(g);
+
+      // Hard safety: if spawned in a tight corner, re-pick once
+      if (!isSafeCirclePosition(g.x, g.y, g.radius)) {
+        const cand = pick(REACH.tiles);
+        g.x = (cand.tx+0.5)*TILE; g.y = (cand.ty+0.5)*TILE;
+        resolveCircleVsMap(g);
+      }
+
       guards.push(g);
       used.push({ x: g.x, y: g.y });
     }
@@ -1070,7 +1045,6 @@
     for (let i = 0; i < POWERUP_CFG.maxOnMap; i++) spawnPowerup(true);
     powerupSpawnTimer = POWERUP_CFG.spawnInterval * 0.6;
 
-    // Game
     gameTime = GAME_CFG.timeLimit;
     gameOver = false;
     win = false;
