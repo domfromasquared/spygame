@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-  <title>Top-Down Stealth (Pac-Style Map + Textures + Mobile Joystick)</title>
+  <title>Top-Down Stealth (Pac-Style Map + Textures + Mobile Joystick + 128px Sprites)</title>
   <style>
     :root { color-scheme: dark; }
     body { margin:0; background:#0b0f14; color:#e6edf3; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
@@ -53,28 +53,16 @@
       z-index: 9999;
     }
 
-    /* =========================
-       MOBILE LAYOUT OVERRIDES
-       - Canvas fills screen width
-       - UI stays visible (joystick + essentials)
-       ========================= */
+    /* MOBILE layout */
     body.mobile #wrap {
       padding: 10px;
       gap: 10px;
       flex-direction: column;
       align-items: stretch;
     }
-    body.mobile .panel {
-      width: 100%;
-      order: 2;
-    }
-    body.mobile canvas {
-      width: 100%;
-      height: auto;          /* JS will set real pixel size */
-      order: 1;
-      border-radius: 10px;
-    }
-    body.mobile .hint { display: none; } /* keep it compact; remove if you want it visible */
+    body.mobile .panel { width: 100%; order: 2; }
+    body.mobile canvas { width: 100%; height: auto; order: 1; border-radius: 10px; }
+    body.mobile .hint { display: none; }
   </style>
 </head>
 <body>
@@ -99,7 +87,7 @@
         <div class="joystick" id="joy">
           <div class="joystickKnob" id="joyKnob"></div>
         </div>
-        <div class="joystickNote">Drag the knob to move. Keyboard still works.</div>
+        <div class="joystickNote">Drag the knob to move.</div>
       </div>
 
       <div class="hint">
@@ -112,7 +100,7 @@
   </div>
 </div>
 
-<div class="loading" id="loading">Loading textures…</div>
+<div class="loading" id="loading">Loading textures & sprites…</div>
 
 <script>
 (() => {
@@ -147,7 +135,7 @@
   // =============================
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d");
-  ctx.imageSmoothingEnabled = false;
+  ctx.imageSmoothingEnabled = true; // high-detail sprites look better with smoothing on
 
   const UI = {
     loading: document.getElementById("loading"),
@@ -163,20 +151,23 @@
     joyKnob: document.getElementById("joyKnob"),
   };
 
-  // Show joystick only on mobile (still works on desktop, but requested behavior)
   if (!isMobile) UI.joyWrap.style.display = "none";
 
   // =============================
-  // Config (tile map stays the same logic)
+  // Config
   // =============================
   const TILE = 32;
   const MAP_W = 26;
   const MAP_H = 18;
 
+  const DESKTOP_W = MAP_W * TILE; // 832
+  const DESKTOP_H = MAP_H * TILE; // 576
+
   const GAME_CFG = { targetScore: 150, timeLimit: 75, maxHP: 100 };
 
+  // Keep collision small so it fits corridors; draw sprite bigger for visuals.
   const PLAYER_CFG = {
-    radius: 12,
+    radius: 12,         // collision (24x24)
     speed: 175,
     damageGrace: 0.10,
   };
@@ -186,7 +177,7 @@
     patrolSpeed: 95,
 
     // Slightly slower than spy while chasing:
-    chaseSpeed: 160, // < 175
+    chaseSpeed: 160,    // < 175
 
     visionRange: 220,
     coneHalfAngle: Math.PI / 7,
@@ -212,58 +203,33 @@
   };
 
   // =============================
-  // Canvas sizing rules
-  // Desktop: keep original
-  // Mobile: fit to screen with UI visible
+  // Sprite setup (recommended)
+  // - Your source images are 128x128
+  // - We DRAW them at ~56px so they fit corridors visually
   // =============================
-  const DESKTOP_W = MAP_W * TILE; // 832
-  const DESKTOP_H = MAP_H * TILE; // 576
+  const SPRITE = {
+    sourceSize: 128,
+    drawSize: 56, // <- tweak: 48 to 64 recommended
+  };
 
-  function sizeCanvasForDevice() {
-    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  // Spy files (compass directions)
+  // Expect in /assets: spyn.png, spys.png, spyw.png, spye.png, spynw.png, spyne.png, spysw.png, spyse.png
+  const SPY_FILES = {
+    n:  "assets/spyn.png",
+    ne: "assets/spyne.png",
+    e:  "assets/spye.png",
+    se: "assets/spyse.png",
+    s:  "assets/spys.png",
+    sw: "assets/spysw.png",
+    w:  "assets/spyw.png",
+    nw: "assets/spynw.png",
+  };
 
-    if (!isMobile) {
-      // Desktop: fixed pixel-perfect map
-      canvas.width = DESKTOP_W;
-      canvas.height = DESKTOP_H;
-      canvas.style.width = DESKTOP_W + "px";
-      canvas.style.height = DESKTOP_H + "px";
-      return;
-    }
+  // Guards: if you have one guard sprite, name it guard.png.
+  // If you ALSO have direction variants later, you can extend this similarly.
+  const GUARD_FILE = "assets/guard.png";
 
-    // Mobile: canvas fills width; height fits remaining space above UI
-    // Give UI room so joystick stays in view
-    const padding = 20; // body padding-ish
-    const widthCSS = Math.max(320, window.innerWidth - padding);
-    const uiEstimated = Math.min(340, window.innerHeight * 0.42); // room for HUD+joystick
-    const heightCSS = Math.max(260, window.innerHeight - uiEstimated - padding);
-
-    // Keep aspect ratio of the map
-    const mapAspect = DESKTOP_W / DESKTOP_H;
-    let w = widthCSS;
-    let h = Math.round(w / mapAspect);
-    if (h > heightCSS) {
-      h = heightCSS;
-      w = Math.round(h * mapAspect);
-    }
-
-    canvas.style.width = w + "px";
-    canvas.style.height = h + "px";
-    canvas.width = Math.floor(w * dpr);
-    canvas.height = Math.floor(h * dpr);
-
-    // Scale drawing so game world remains in "map pixels" coordinates
-    // We render the world to a virtual surface size DESKTOP_W x DESKTOP_H.
-    // We do this by scaling the context each frame (see render()).
-  }
-
-  window.addEventListener("resize", () => {
-    sizeCanvasForDevice();
-  });
-
-  // =============================
-  // Assets
-  // =============================
+  // Textures (tile sized, but can be any resolution; they'll be scaled)
   const ASSETS = {
     floor: "assets/floortexture.png",
     wall:  "assets/walltexture.png",
@@ -278,8 +244,43 @@
     });
   }
 
+  // Loaded images
   let floorImg, wallImg;
   let floorPattern = null;
+  const spySprites = {}; // key -> Image
+  let guardSprite = null;
+
+  // =============================
+  // Canvas sizing
+  // =============================
+  function sizeCanvasForDevice() {
+    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+
+    if (!isMobile) {
+      canvas.width = DESKTOP_W;
+      canvas.height = DESKTOP_H;
+      canvas.style.width = DESKTOP_W + "px";
+      canvas.style.height = DESKTOP_H + "px";
+      return;
+    }
+
+    const padding = 20;
+    const widthCSS = Math.max(320, window.innerWidth - padding);
+    const uiEstimated = Math.min(360, window.innerHeight * 0.44);
+    const heightCSS = Math.max(260, window.innerHeight - uiEstimated - padding);
+
+    const mapAspect = DESKTOP_W / DESKTOP_H;
+    let w = widthCSS;
+    let h = Math.round(w / mapAspect);
+    if (h > heightCSS) { h = heightCSS; w = Math.round(h * mapAspect); }
+
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+  }
+
+  window.addEventListener("resize", () => sizeCanvasForDevice());
 
   // =============================
   // Input: Keyboard + Joystick
@@ -306,10 +307,11 @@
     joystick.vy = clamp(ny / joystick.max, -1, 1);
     UI.joyKnob.style.transform = `translate(${nx}px, ${ny}px)`;
   }
+
   function resetJoystick() {
     joystick.active = false; joystick.id = null;
     joystick.vx = 0; joystick.vy = 0;
-    if (UI.joyKnob) UI.joyKnob.style.transform = `translate(0px, 0px)`;
+    UI.joyKnob.style.transform = `translate(0px, 0px)`;
   }
 
   if (UI.joy) {
@@ -361,6 +363,19 @@
     }
     if (!kActive) return { x: 0, y: 0 };
     return norm(x, y);
+  }
+
+  // Direction key from movement vector (8-way)
+  function dirKeyFromVector(vx, vy, fallbackKey="s") {
+    const mag = Math.hypot(vx, vy);
+    if (mag < 0.02) return fallbackKey;
+
+    const a = Math.atan2(vy, vx); // -PI..PI, 0 = east
+    // Map to 8 dirs: E, NE, N, NW, W, SW, S, SE
+    const oct = Math.round(8 * a / (2 * Math.PI) + 8) % 8;
+    // order for oct indexes (starting at E)
+    const keys = ["e","ne","n","nw","w","sw","s","se"];
+    return keys[oct];
   }
 
   // =============================
@@ -498,7 +513,6 @@
     if (Math.random() < 0.5) m = flipHorizontal(m);
     if (Math.random() < 0.25) m = flipVertical(m);
     if (Math.random() < 0.9) m = applyGateVariations(m);
-
     if (!isFullyConnected(m)) {
       m = parseTemplate(pick(MAP_TEMPLATES));
       if (Math.random() < 0.5) m = flipHorizontal(m);
@@ -637,7 +651,7 @@
   }
 
   // =============================
-  // Powerups (points only)
+  // Powerups
   // =============================
   function randomReachablePosition() {
     for (let i = 0; i < 180; i++) {
@@ -876,6 +890,10 @@
     player.x += mv.x * player.speed * dt;
     player.y += mv.y * player.speed * dt;
     resolveCircleVsMap(player);
+
+    // Track facing direction based on movement (8-way)
+    const key = dirKeyFromVector(mv.x, mv.y, player.facing || "s");
+    player.facing = key;
   }
 
   function updatePowerups(dt) {
@@ -933,23 +951,19 @@
   }
 
   // =============================
-  // Rendering (TEXTURES)
-  // IMPORTANT: on mobile we render the "world" scaled to fit canvas.
-  // We draw everything in world coords (0..DESKTOP_W, 0..DESKTOP_H)
-  // and scale the context to the actual canvas size.
+  // Rendering (scaled world on mobile)
   // =============================
   function beginWorldRender() {
     if (!isMobile) {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       return;
     }
-    const sx = canvas.width / (DESKTOP_W);
-    const sy = canvas.height / (DESKTOP_H);
+    const sx = canvas.width / DESKTOP_W;
+    const sy = canvas.height / DESKTOP_H;
     ctx.setTransform(sx, 0, 0, sy, 0, 0);
   }
 
   function drawMapTextured() {
-    // floor
     if (floorPattern) {
       ctx.fillStyle = floorPattern;
       ctx.fillRect(0, 0, DESKTOP_W, DESKTOP_H);
@@ -957,13 +971,16 @@
       ctx.fillStyle = "#000";
       ctx.fillRect(0, 0, DESKTOP_W, DESKTOP_H);
     }
-
-    // walls
     for (let y = 0; y < MAP_H; y++) {
       for (let x = 0; x < MAP_W; x++) {
         if (map[y][x] === 1) ctx.drawImage(wallImg, x*TILE, y*TILE, TILE, TILE);
       }
     }
+  }
+
+  function drawSpriteCentered(img, x, y, size) {
+    if (!img) return;
+    ctx.drawImage(img, x - size/2, y - size/2, size, size);
   }
 
   function drawGuard(g) {
@@ -980,31 +997,28 @@
     ctx.fill();
     ctx.restore();
 
-    // Body
-    ctx.beginPath();
-    ctx.fillStyle = (g.state === "CHASE") ? "#ff7b72" : "#c9d1d9";
-    ctx.arc(g.x, g.y, g.radius, 0, Math.PI*2);
-    ctx.fill();
-
-    // Facing dot
-    const f = norm(g.dirX, g.dirY);
-    ctx.beginPath();
-    ctx.fillStyle = "#0b0f14";
-    ctx.arc(g.x + f.x * 8, g.y + f.y * 8, 3, 0, Math.PI*2);
-    ctx.fill();
+    // Guard sprite (fallback to circle if missing)
+    if (guardSprite) {
+      drawSpriteCentered(guardSprite, g.x, g.y, SPRITE.drawSize);
+    } else {
+      ctx.beginPath();
+      ctx.fillStyle = (g.state === "CHASE") ? "#ff7b72" : "#c9d1d9";
+      ctx.arc(g.x, g.y, g.radius, 0, Math.PI*2);
+      ctx.fill();
+    }
   }
 
   function drawPlayer() {
-    ctx.beginPath();
-    ctx.fillStyle = "#7ee787";
-    ctx.arc(player.x, player.y, player.radius, 0, Math.PI*2);
-    ctx.fill();
+    const key = player.facing || "s";
+    const img = spySprites[key];
 
-    const mv = getMoveVector();
-    if (mv.x !== 0 || mv.y !== 0) {
+    // Spy sprite (fallback to circle if missing)
+    if (img) {
+      drawSpriteCentered(img, player.x, player.y, SPRITE.drawSize);
+    } else {
       ctx.beginPath();
-      ctx.fillStyle = "#0b0f14";
-      ctx.arc(player.x + mv.x * 8, player.y + mv.y * 8, 3, 0, Math.PI*2);
+      ctx.fillStyle = "#7ee787";
+      ctx.arc(player.x, player.y, player.radius, 0, Math.PI*2);
       ctx.fill();
     }
   }
@@ -1114,7 +1128,6 @@
   function restart() {
     map = generatePacStyleMap();
 
-    // Player spawn near top-left corridors
     const pSpawn = findSafeFloorSpawn(PLAYER_CFG.radius, { tx: 2, ty: 2 });
     player = {
       x: pSpawn.x,
@@ -1124,12 +1137,12 @@
       hp: GAME_CFG.maxHP,
       score: 0,
       coneContact: 0,
+      facing: "s", // default facing
     };
     resolveCircleVsMap(player);
 
     REACH = computeReachableFrom(player.x, player.y);
 
-    // Guards: spawn on walkable tiles away from player
     guards = [];
     const guardCount = 3;
     const used = [{ x: player.x, y: player.y }];
@@ -1164,7 +1177,6 @@
       used.push({ x: g.x, y: g.y });
     }
 
-    // Powerups
     powerups = [];
     floaters = [];
     for (let i = 0; i < POWERUP_CFG.maxOnMap; i++) spawnPowerup(true);
@@ -1205,16 +1217,23 @@
   }
 
   // =============================
-  // Boot
+  // Boot (load textures + spy directional sprites)
   // =============================
   async function boot() {
     sizeCanvasForDevice();
 
     try {
-      [floorImg, wallImg] = await Promise.all([
+      const spyKeys = Object.keys(SPY_FILES);
+      const spyLoads = spyKeys.map(k => loadImage(SPY_FILES[k]).then(img => (spySprites[k] = img)));
+
+      [floorImg, wallImg, guardSprite] = await Promise.all([
         loadImage(ASSETS.floor),
         loadImage(ASSETS.wall),
+        loadImage(GUARD_FILE).catch(() => null), // allow missing guard sprite
       ]);
+
+      await Promise.all(spyLoads); // ensure spy sprites loaded
+
       floorPattern = ctx.createPattern(floorImg, "repeat");
 
       UI.loading.style.display = "none";
@@ -1222,16 +1241,17 @@
       requestAnimationFrame(tick);
     } catch (err) {
       UI.loading.textContent =
-        "Could not load textures. Check paths:\n" +
-        "assets/floortexture.png\nassets/walltexture.png\n\n" +
-        "Tip: serve the folder (GitHub Pages / local server) instead of opening as file://";
+        "Could not load images. Check file names/paths in /assets:\n" +
+        "floortexture.png, walltexture.png\n" +
+        "spyn.png, spyne.png, spye.png, spyse.png, spys.png, spysw.png, spyw.png, spynw.png\n" +
+        "(optional) guard.png\n\n" +
+        "Also: serve the folder (GitHub Pages / local server) instead of opening as file://";
       console.error(err);
     }
   }
 
   // =============================
-  // Missing functions used in game loop
-  // (kept here for clarity)
+  // The remaining required functions
   // =============================
   function updateDamage(dt) {
     let seenNow = false;
@@ -1256,7 +1276,11 @@
     else if (player.hp <= 0) { gameOver = true; win = false; }
   }
 
+  // =============================
+  // START
+  // =============================
   boot();
+
 })();
 </script>
 </body>
