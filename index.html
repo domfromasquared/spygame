@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Top-Down Stealth (Power-ups = Points Only)</title>
+  <title>Top-Down Stealth (Connected Map + Mobile Joystick)</title>
   <style>
     :root { color-scheme: dark; }
     body { margin:0; background:#0b0f14; color:#e6edf3; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
     #wrap { display:flex; gap:16px; padding:16px; align-items:flex-start; flex-wrap:wrap; }
-    canvas { background:#0f1621; border:1px solid #243244; border-radius:12px; }
-    .panel { width: 280px; }
+    canvas { background:#0f1621; border:1px solid #243244; border-radius:12px; touch-action:none; }
+    .panel { width: 300px; }
     .hud { padding:12px; border:1px solid #243244; border-radius:12px; background:#0f1621; }
     .row { display:flex; justify-content:space-between; margin:8px 0; }
     .bar { height:10px; background:#243244; border-radius:999px; overflow:hidden; }
@@ -19,11 +19,48 @@
     button:hover { filter: brightness(1.1); }
     .flash { animation: flash 140ms ease-in-out; }
     @keyframes flash { from { filter: brightness(1.8); } to { filter: brightness(1); } }
+
+    /* Mobile joystick */
+    .joystickWrap {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid #243244;
+    }
+    .joystickTitle { font-weight: 600; margin-bottom: 8px; opacity: 0.95; }
+    .joystick {
+      width: 160px;
+      height: 160px;
+      border-radius: 999px;
+      border: 1px solid #243244;
+      background: radial-gradient(circle at 50% 50%, rgba(121,192,255,0.12), rgba(15,22,33,0.2));
+      position: relative;
+      user-select: none;
+      touch-action: none;
+      display: grid;
+      place-items: center;
+      margin: 0 auto;
+    }
+    .joystickKnob {
+      width: 64px;
+      height: 64px;
+      border-radius: 999px;
+      background: rgba(201,209,217,0.18);
+      border: 1px solid rgba(201,209,217,0.35);
+      box-shadow: 0 8px 20px rgba(0,0,0,0.35);
+      transform: translate(0px, 0px);
+      pointer-events: none;
+    }
+    .joystickNote {
+      font-size: 0.85rem;
+      opacity: 0.75;
+      margin-top: 8px;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
 <div id="wrap">
-  <canvas id="game" width="800" height="544"></canvas>
+  <canvas id="game" width="832" height="576"></canvas>
 
   <div class="panel">
     <div class="hud" id="hud">
@@ -36,10 +73,18 @@
 
       <div class="row" style="margin-top:10px;"><div>Power-ups on map</div><div id="pcount">0</div></div>
 
-      <button id="restart">Restart</button>
+      <button id="restart">Restart (new connected map)</button>
+
+      <div class="joystickWrap">
+        <div class="joystickTitle">Mobile Joystick</div>
+        <div class="joystick" id="joy">
+          <div class="joystickKnob" id="joyKnob"></div>
+        </div>
+        <div class="joystickNote">Drag the knob to move. Keyboard still works.</div>
+      </div>
 
       <div class="hint">
-        Move: WASD / Arrow Keys<br/>
+        Move: WASD / Arrow Keys / Joystick<br/>
         Avoid flashlight cones—standing in them drains health.<br/>
         Guards chase only after spotting you and give up after losing line-of-sight.<br/>
         <b>Score only comes from collecting power-ups.</b>
@@ -64,6 +109,8 @@
   };
   const dot = (ax, ay, bx, by) => ax*bx + ay*by;
   const lerp = (a, b, t) => a + (b - a) * t;
+  const randInt = (a, b) => Math.floor(a + Math.random() * (b - a + 1));
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
   // =============================
   // Canvas / UI
@@ -79,25 +126,27 @@
     hpBar: document.getElementById("hpBar"),
     pcount: document.getElementById("pcount"),
     restart: document.getElementById("restart"),
+    joy: document.getElementById("joy"),
+    joyKnob: document.getElementById("joyKnob"),
   };
 
   // =============================
   // Config
   // =============================
   const TILE = 32;
-  const MAP_W = 25;
-  const MAP_H = 17;
+  const MAP_W = 26;
+  const MAP_H = 18;
 
   const GAME_CFG = {
     targetScore: 150,
-    timeLimit: 75,          // seconds
+    timeLimit: 75,
     maxHP: 100,
   };
 
   const PLAYER_CFG = {
     radius: 12,
-    speed: 170,             // px/sec
-    damageGrace: 0.10,      // seconds of cone contact before DPS starts
+    speed: 175,
+    damageGrace: 0.10,
   };
 
   const GUARD_CFG = {
@@ -105,52 +154,136 @@
     patrolSpeed: 95,
     chaseSpeed: 140,
     visionRange: 220,
-    coneHalfAngle: Math.PI / 7,   // ~25.7 degrees
-    dps: 26,                      // damage per second while visible in cone
-    loseSightGrace: 1.2,          // seconds after losing sight -> SEARCH
-    searchDuration: 2.0,          // seconds to linger/scan at last seen
+    coneHalfAngle: Math.PI / 7,
+    dps: 26,
+    loseSightGrace: 1.2,
+    searchDuration: 2.0,
     turnSmoothing: 10,
-    patrolMode: "PINGPONG",       // "LOOP" or "PINGPONG"
+    patrolMode: "PINGPONG", // "LOOP" or "PINGPONG"
   };
 
   const POWERUP_CFG = {
-    spawnInterval: 2.8,      // seconds between spawn attempts
-    maxOnMap: 3,             // cap active pickups
-    ttl: 7.0,                // seconds before despawn
+    spawnInterval: 2.8,
+    maxOnMap: 3,
+    ttl: 7.0,
     pickupRadius: 18,
     minSpawnDistFromPlayer: 2.5 * TILE,
   };
 
-  const DEBUG = {
-    drawUnreachableTint: false, // set true to visualize unreachable areas
-    drawReachableTint: false,
-    drawGuardPaths: false,
+  // =============================
+  // Input: Keyboard + Joystick
+  // =============================
+  const keys = new Set();
+  window.addEventListener("keydown", (e) => keys.add(e.key.toLowerCase()));
+  window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+
+  const joystick = {
+    active: false,
+    id: null,
+    vx: 0, vy: 0,       // -1..1
+    max: 50,            // px knob travel
+    centerX: 0, centerY: 0,
   };
 
+  function setJoystickVectorFromPointer(clientX, clientY) {
+    const rect = UI.joy.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    joystick.centerX = cx;
+    joystick.centerY = cy;
+
+    const dx = clientX - cx;
+    const dy = clientY - cy;
+    const d = Math.hypot(dx, dy) || 1;
+
+    const max = joystick.max;
+    const k = Math.min(1, max / d);
+
+    const nx = dx * k;
+    const ny = dy * k;
+
+    // Normalize to -1..1 range based on max travel
+    joystick.vx = clamp(nx / max, -1, 1);
+    joystick.vy = clamp(ny / max, -1, 1);
+
+    UI.joyKnob.style.transform = `translate(${nx}px, ${ny}px)`;
+  }
+
+  function resetJoystick() {
+    joystick.vx = 0; joystick.vy = 0;
+    joystick.active = false;
+    joystick.id = null;
+    UI.joyKnob.style.transform = `translate(0px, 0px)`;
+  }
+
+  UI.joy.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    UI.joy.setPointerCapture(e.pointerId);
+    joystick.active = true;
+    joystick.id = e.pointerId;
+    setJoystickVectorFromPointer(e.clientX, e.clientY);
+  });
+
+  UI.joy.addEventListener("pointermove", (e) => {
+    if (!joystick.active || e.pointerId !== joystick.id) return;
+    e.preventDefault();
+    setJoystickVectorFromPointer(e.clientX, e.clientY);
+  });
+
+  UI.joy.addEventListener("pointerup", (e) => {
+    if (e.pointerId !== joystick.id) return;
+    e.preventDefault();
+    resetJoystick();
+  });
+
+  UI.joy.addEventListener("pointercancel", (e) => {
+    if (e.pointerId !== joystick.id) return;
+    e.preventDefault();
+    resetJoystick();
+  });
+
+  function getMoveVector() {
+    // Keyboard first
+    let x = 0, y = 0;
+    if (keys.has("w") || keys.has("arrowup")) y -= 1;
+    if (keys.has("s") || keys.has("arrowdown")) y += 1;
+    if (keys.has("a") || keys.has("arrowleft")) x -= 1;
+    if (keys.has("d") || keys.has("arrowright")) x += 1;
+
+    // Joystick blends in (if keyboard is not active, joystick drives fully)
+    const kActive = (x !== 0 || y !== 0);
+    if (joystick.active || (!kActive && (Math.abs(joystick.vx) > 0.02 || Math.abs(joystick.vy) > 0.02))) {
+      const jx = joystick.vx;
+      const jy = joystick.vy;
+      if (!kActive) {
+        // full joystick control
+        const m = norm(jx, jy);
+        const mag = clamp(Math.hypot(jx, jy), 0, 1);
+        return { x: m.x * mag, y: m.y * mag };
+      } else {
+        // blend
+        const kb = norm(x, y);
+        const blended = { x: kb.x + jx * 0.6, y: kb.y + jy * 0.6 };
+        const m = norm(blended.x, blended.y);
+        const mag = clamp(Math.hypot(blended.x, blended.y), 0, 1);
+        return { x: m.x * mag, y: m.y * mag };
+      }
+    }
+
+    if (x === 0 && y === 0) return { x: 0, y: 0 };
+    return norm(x, y);
+  }
+
   // =============================
-  // Map (1 = wall, 0 = floor)
-  // Includes unreachable floor islands (intentionally).
+  // Map: generated with LOTS of openings AND fully connected floor
+  // 1 = wall, 0 = floor
+  // Strategy:
+  // - Start with all floor
+  // - Add random wall rectangles one by one
+  // - Only keep a wall addition if it does NOT disconnect the walkable space
+  // This guarantees "every location" (every floor tile) is reachable.
   // =============================
-  const mapRows = [
-    "1111111111111111111111111",
-    "1000000000000010000000001",
-    "1011110111111010111111101",
-    "1010000100000010100000101",
-    "1010111101111110101111101",
-    "1010100001000000101000001",
-    "1010101111011111101011111",
-    "1000101000010000001010001",
-    "1111101011110111111010111",
-    "1000001010000100000010001",
-    "1011111010111101111111101",
-    "1010000010100001000000001",
-    "1010111110101111011111101",
-    "1010000000100000010000001",
-    "1011111111111111110111101",
-    "1000000000000000000000001", // bottom corridor
-    "1111111111111111111111111",
-  ];
-  const map = mapRows.map(r => r.split("").map(c => c === "1" ? 1 : 0));
+  let map = null;
 
   const isWallTile = (tx, ty) => {
     if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return true;
@@ -158,28 +291,115 @@
   };
   const worldToTile = (x, y) => ({ tx: Math.floor(x / TILE), ty: Math.floor(y / TILE) });
 
-  // =============================
-  // Line-of-sight (simple sampling)
-  // =============================
-  function hasLineOfSight(ax, ay, bx, by) {
-    const dx = bx - ax, dy = by - ay;
-    const d = Math.hypot(dx, dy);
-    if (d < 1) return true;
+  function makeEmptyFloorMap() {
+    const m = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(0));
+    // Border walls
+    for (let x = 0; x < MAP_W; x++) { m[0][x] = 1; m[MAP_H-1][x] = 1; }
+    for (let y = 0; y < MAP_H; y++) { m[y][0] = 1; m[y][MAP_W-1] = 1; }
+    return m;
+  }
 
-    const steps = Math.ceil(d / 8);
-    const sx = dx / steps, sy = dy / steps;
+  function bfsReachableFromTile(startTx, startTy, m) {
+    const reachable = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(false));
+    if (m[startTy][startTx] === 1) return { reachable, count: 0 };
 
-    let x = ax, y = ay;
-    for (let i = 0; i < steps; i++) {
-      const { tx, ty } = worldToTile(x, y);
-      if (isWallTile(tx, ty)) return false;
-      x += sx; y += sy;
+    const q = [{ tx: startTx, ty: startTy }];
+    reachable[startTy][startTx] = true;
+
+    const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+    let count = 1;
+
+    while (q.length) {
+      const { tx, ty } = q.shift();
+      for (const d of dirs) {
+        const nx = tx + d.x, ny = ty + d.y;
+        if (nx < 0 || ny < 0 || nx >= MAP_W || ny >= MAP_H) continue;
+        if (reachable[ny][nx]) continue;
+        if (m[ny][nx] === 1) continue;
+        reachable[ny][nx] = true;
+        count++;
+        q.push({ tx: nx, ty: ny });
+      }
     }
-    return true;
+    return { reachable, count };
+  }
+
+  function countFloorTiles(m) {
+    let c = 0;
+    for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) if (m[y][x] === 0) c++;
+    return c;
+  }
+
+  function placeWallRect(m, x0, y0, w, h) {
+    const changed = [];
+    for (let y = y0; y < y0 + h; y++) {
+      for (let x = x0; x < x0 + w; x++) {
+        if (x <= 0 || y <= 0 || x >= MAP_W-1 || y >= MAP_H-1) continue; // keep border
+        if (m[y][x] === 0) {
+          m[y][x] = 1;
+          changed.push({ x, y });
+        }
+      }
+    }
+    return changed;
+  }
+
+  function undoChanges(m, changed) {
+    for (const c of changed) m[c.y][c.x] = 0;
+  }
+
+  function generateConnectedOpenMap() {
+    // Player start is near top-left interior (we’ll later find a safe floor spawn too)
+    const startTx = 2, startTy = 2;
+
+    let m = makeEmptyFloorMap();
+
+    // Add “pillars” and “bars” but keep it open
+    // We only keep a wall addition if the map remains fully connected.
+    const attempts = 220;
+    for (let i = 0; i < attempts; i++) {
+      const w = randInt(1, 4);
+      const h = randInt(1, 3);
+      const x0 = randInt(1, MAP_W - 2 - w);
+      const y0 = randInt(1, MAP_H - 2 - h);
+
+      // Don’t block the immediate spawn vicinity too much
+      const nearSpawn = (x0 <= 4 && y0 <= 4);
+      if (nearSpawn && Math.random() < 0.85) continue;
+
+      const changed = placeWallRect(m, x0, y0, w, h);
+      if (changed.length === 0) continue;
+
+      const floorCount = countFloorTiles(m);
+      const res = bfsReachableFromTile(startTx, startTy, m);
+
+      // If disconnected, undo this wall placement
+      if (res.count !== floorCount) {
+        undoChanges(m, changed);
+      }
+    }
+
+    // Add a few single-tile “nubs” (again only if connectivity stays)
+    for (let i = 0; i < 160; i++) {
+      const x = randInt(1, MAP_W-2);
+      const y = randInt(1, MAP_H-2);
+      if ((x <= 4 && y <= 4) && Math.random() < 0.9) continue;
+      if (m[y][x] === 1) continue;
+
+      m[y][x] = 1;
+      const floorCount = countFloorTiles(m);
+      const res = bfsReachableFromTile(startTx, startTy, m);
+      if (res.count !== floorCount) m[y][x] = 0;
+    }
+
+    // Ensure start is floor
+    m[startTy][startTx] = 0;
+    return m;
   }
 
   // =============================
   // Collision: circle vs map tiles
+  // (prevents getting trapped in walls)
   // =============================
   function resolveCircleVsMap(ent) {
     const r = ent.radius;
@@ -191,7 +411,8 @@
 
     for (let ty = minTy; ty <= maxTy; ty++) {
       for (let tx = minTx; tx <= maxTx; tx++) {
-        if (!isWallTile(tx, ty)) continue;
+        if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) continue;
+        if (map[ty][tx] !== 1) continue;
 
         const left = tx * TILE, top = ty * TILE;
         const right = left + TILE, bottom = top + TILE;
@@ -211,27 +432,65 @@
     }
   }
 
-  // =============================
-  // Input
-  // =============================
-  const keys = new Set();
-  window.addEventListener("keydown", (e) => keys.add(e.key.toLowerCase()));
-  window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+  function isSafeCirclePosition(x, y, radius) {
+    // Quick test: resolve; if it moves, it was overlapping walls
+    const test = { x, y, radius };
+    const bx = test.x, by = test.y;
+    resolveCircleVsMap(test);
+    return dist2(bx, by, test.x, test.y) < 1;
+  }
 
-  function getMoveVector() {
-    let x = 0, y = 0;
-    if (keys.has("w") || keys.has("arrowup")) y -= 1;
-    if (keys.has("s") || keys.has("arrowdown")) y += 1;
-    if (keys.has("a") || keys.has("arrowleft")) x -= 1;
-    if (keys.has("d") || keys.has("arrowright")) x += 1;
+  function findSafeFloorSpawn(radius, preferNear = { tx: 2, ty: 2 }) {
+    // Prefer nearby, but fall back to random
+    const candidates = [];
+    for (let y = 1; y < MAP_H-1; y++) {
+      for (let x = 1; x < MAP_W-1; x++) {
+        if (map[y][x] !== 0) continue;
+        candidates.push({ tx: x, ty: y, d: Math.abs(x - preferNear.tx) + Math.abs(y - preferNear.ty) });
+      }
+    }
+    candidates.sort((a, b) => a.d - b.d);
 
-    if (x === 0 && y === 0) return { x: 0, y: 0 };
-    return norm(x, y);
+    // Try nearest first
+    for (let i = 0; i < Math.min(120, candidates.length); i++) {
+      const t = candidates[i];
+      const x = (t.tx + 0.5) * TILE;
+      const y = (t.ty + 0.5) * TILE;
+      if (isSafeCirclePosition(x, y, radius)) return { x, y, tx: t.tx, ty: t.ty };
+    }
+
+    // Random fallback
+    for (let i = 0; i < 500; i++) {
+      const t = pick(candidates);
+      const x = (t.tx + 0.5) * TILE;
+      const y = (t.ty + 0.5) * TILE;
+      if (isSafeCirclePosition(x, y, radius)) return { x, y, tx: t.tx, ty: t.ty };
+    }
+    return { x: 2.5*TILE, y: 2.5*TILE, tx: 2, ty: 2 };
   }
 
   // =============================
-  // Reachability: BFS from player start
-  // Ensures power-ups only spawn in accessible areas.
+  // Line-of-sight
+  // =============================
+  function hasLineOfSight(ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    const d = Math.hypot(dx, dy);
+    if (d < 1) return true;
+
+    const steps = Math.ceil(d / 8);
+    const sx = dx / steps, sy = dy / steps;
+
+    let x = ax, y = ay;
+    for (let i = 0; i < steps; i++) {
+      const { tx, ty } = worldToTile(x, y);
+      if (isWallTile(tx, ty)) return false;
+      x += sx; y += sy;
+    }
+    return true;
+  }
+
+  // =============================
+  // Reachability (for powerup spawns)
   // =============================
   function computeReachableFrom(startX, startY) {
     const start = worldToTile(startX, startY);
@@ -255,25 +514,26 @@
     const tiles = [];
     for (let y = 0; y < MAP_H; y++) {
       for (let x = 0; x < MAP_W; x++) {
-        if (reachable[y][x]) tiles.push({ tx: x, ty: y });
+        if (map[y][x] === 0 && reachable[y][x]) tiles.push({ tx: x, ty: y });
       }
     }
     return { reachable, tiles };
   }
 
   // =============================
-  // Entities / Game State
+  // Entities / State
   // =============================
   let player, guards, powerups, floaters, REACH, gameTime, gameOver, win;
+  let powerupSpawnTimer = 0;
 
   function makeGuard(x, y, waypoints) {
     return {
       x, y,
       radius: GUARD_CFG.radius,
-      state: "PATROL", // PATROL | CHASE | SEARCH
+      state: "PATROL",
       waypoints,
       wpIndex: 0,
-      wpDir: 1,        // for pingpong
+      wpDir: 1,
       dirX: 1, dirY: 0,
       lastSeenX: x, lastSeenY: y,
       timeSinceSeen: 999,
@@ -281,110 +541,48 @@
     };
   }
 
-  // Points-only powerups with rarity tiers.
   function randomPointsValue() {
     const r = Math.random();
-    if (r < 0.70) return 10;   // common
-    if (r < 0.93) return 20;   // uncommon
-    return 50;                // rare
+    if (r < 0.70) return 10;
+    if (r < 0.93) return 20;
+    return 50;
   }
 
-  function restart() {
-    player = {
-      x: 2.5 * TILE,
-      y: 2.5 * TILE,
-      radius: PLAYER_CFG.radius,
-      speed: PLAYER_CFG.speed,
-      hp: GAME_CFG.maxHP,
-      score: 0,
-      coneContact: 0, // how long continuously in cone
-    };
-
-    guards = [
-      makeGuard(18.5*TILE, 2.5*TILE, [
-        {x:18.5*TILE, y:2.5*TILE},
-        {x:22.5*TILE, y:2.5*TILE},
-        {x:22.5*TILE, y:6.5*TILE},
-        {x:18.5*TILE, y:6.5*TILE},
-      ]),
-      makeGuard(7.5*TILE, 12.5*TILE, [
-        {x:7.5*TILE, y:12.5*TILE},
-        {x:11.5*TILE, y:12.5*TILE},
-        {x:11.5*TILE, y:15.5*TILE},
-        {x:7.5*TILE, y:15.5*TILE},
-      ]),
-    ];
-
-    powerups = [];
-    floaters = []; // {x,y,text,ttl,vy}
-    gameTime = GAME_CFG.timeLimit;
-    gameOver = false;
-    win = false;
-
-    // Resolve player in case of spawn clipping
-    resolveCircleVsMap(player);
-
-    // Compute reachable tiles from player start.
-    REACH = computeReachableFrom(player.x, player.y);
-
-    // Seed initial pickups
-    for (let i = 0; i < POWERUP_CFG.maxOnMap; i++) spawnPowerup(true);
-    powerupSpawnTimer = POWERUP_CFG.spawnInterval * 0.6;
+  function addFloater(x, y, text) {
+    floaters.push({ x, y, text, ttl: 0.9, vy: -28 });
   }
 
-  UI.restart.addEventListener("click", restart);
-
   // =============================
-  // Power-up spawning (reachable only)
+  // Powerups: spawn only on reachable floor
   // =============================
-  let powerupSpawnTimer = 0;
-
   function randomReachablePosition() {
-    // Try multiple candidates to satisfy distance constraints.
-    for (let i = 0; i < 80; i++) {
-      const t = REACH.tiles[Math.floor(Math.random() * REACH.tiles.length)];
+    for (let i = 0; i < 120; i++) {
+      const t = pick(REACH.tiles);
       const x = (t.tx + 0.5) * TILE;
       const y = (t.ty + 0.5) * TILE;
 
       if (dist2(x, y, player.x, player.y) < POWERUP_CFG.minSpawnDistFromPlayer ** 2) continue;
 
-      // avoid stacking on existing powerups
+      // avoid stacking
       let tooClose = false;
       for (const p of powerups) {
         if (dist2(x, y, p.x, p.y) < (TILE * 1.0) ** 2) { tooClose = true; break; }
       }
       if (tooClose) continue;
 
-      // ensure not inside a wall by collision resolve "no move" check
-      const test = { x, y, radius: 10 };
-      const bx = test.x, by = test.y;
-      resolveCircleVsMap(test);
-      if (dist2(bx, by, test.x, test.y) > 1) continue;
+      if (!isSafeCirclePosition(x, y, 10)) continue;
 
       return { x, y };
     }
-
-    // fallback
-    const t = REACH.tiles[Math.floor(Math.random() * REACH.tiles.length)];
+    const t = pick(REACH.tiles);
     return { x: (t.tx + 0.5) * TILE, y: (t.ty + 0.5) * TILE };
   }
 
   function spawnPowerup(force = false) {
     if (!force && powerups.length >= POWERUP_CFG.maxOnMap) return;
-
     const pos = randomReachablePosition();
     const points = randomPointsValue();
-
-    powerups.push({
-      x: pos.x,
-      y: pos.y,
-      ttl: POWERUP_CFG.ttl,
-      points,
-    });
-  }
-
-  function addFloater(x, y, text) {
-    floaters.push({ x, y, text, ttl: 0.9, vy: -28 });
+    powerups.push({ x: pos.x, y: pos.y, ttl: POWERUP_CFG.ttl, points });
   }
 
   // =============================
@@ -394,12 +592,10 @@
     const vx = player.x - g.x;
     const vy = player.y - g.y;
     const d = Math.hypot(vx, vy);
-
     if (d > GUARD_CFG.visionRange) return false;
 
     const v = { x: vx / (d || 1), y: vy / (d || 1) };
     const dir = norm(g.dirX, g.dirY);
-
     const c = clamp(dot(v.x, v.y, dir.x, dir.y), -1, 1);
     const angle = Math.acos(c);
     if (angle > GUARD_CFG.coneHalfAngle) return false;
@@ -416,10 +612,8 @@
     ent.x += vx * speed * dt;
     ent.y += vy * speed * dt;
 
-    // smooth facing
     ent.dirX = lerp(ent.dirX, vx, clamp(GUARD_CFG.turnSmoothing * dt, 0, 1));
     ent.dirY = lerp(ent.dirY, vy, clamp(GUARD_CFG.turnSmoothing * dt, 0, 1));
-
     return d < 6;
   }
 
@@ -428,16 +622,9 @@
       g.wpIndex = (g.wpIndex + 1) % g.waypoints.length;
       return;
     }
-
-    // PINGPONG
     g.wpIndex += g.wpDir;
-    if (g.wpIndex >= g.waypoints.length) {
-      g.wpIndex = g.waypoints.length - 2;
-      g.wpDir = -1;
-    } else if (g.wpIndex < 0) {
-      g.wpIndex = 1;
-      g.wpDir = 1;
-    }
+    if (g.wpIndex >= g.waypoints.length) { g.wpIndex = g.waypoints.length - 2; g.wpDir = -1; }
+    else if (g.wpIndex < 0) { g.wpIndex = 1; g.wpDir = 1; }
   }
 
   function updateGuard(g, dt) {
@@ -460,7 +647,6 @@
     } else if (g.state === "CHASE") {
       moveTowards(g, g.lastSeenX, g.lastSeenY, GUARD_CFG.chaseSpeed, dt);
       resolveCircleVsMap(g);
-
       if (g.timeSinceSeen > GUARD_CFG.loseSightGrace) {
         g.state = "SEARCH";
         g.searchTimer = GUARD_CFG.searchDuration;
@@ -468,19 +654,56 @@
     } else if (g.state === "SEARCH") {
       const atLast = moveTowards(g, g.lastSeenX, g.lastSeenY, GUARD_CFG.patrolSpeed, dt);
       resolveCircleVsMap(g);
-
       if (atLast) {
         g.searchTimer -= dt;
-        // slow scanning rotation
         const t = performance.now() * 0.001;
         g.dirX = Math.cos(t * 1.8);
         g.dirY = Math.sin(t * 1.8);
-
-        if (g.searchTimer <= 0) {
-          g.state = "PATROL";
-        }
+        if (g.searchTimer <= 0) g.state = "PATROL";
       }
     }
+  }
+
+  // =============================
+  // Guard spawn + patrol route generation (safe floor only)
+  // Ensures guards spawn on walking areas and patrol points are walkable.
+  // =============================
+  function randomSafeFloorTile(radius, avoid = []) {
+    // avoid: list of {x,y} world positions to keep distance from
+    for (let i = 0; i < 800; i++) {
+      const t = pick(REACH.tiles);
+      const x = (t.tx + 0.5) * TILE;
+      const y = (t.ty + 0.5) * TILE;
+
+      if (!isSafeCirclePosition(x, y, radius)) continue;
+
+      let ok = true;
+      for (const a of avoid) {
+        if (dist2(x, y, a.x, a.y) < (TILE * 3.0) ** 2) { ok = false; break; }
+      }
+      if (!ok) continue;
+
+      return { x, y };
+    }
+    // fallback near center
+    return { x: (MAP_W/2) * TILE, y: (MAP_H/2) * TILE };
+  }
+
+  function makeRandomPatrolRoute(center, points = 4) {
+    // pick route points somewhat spread out, all walkable
+    const waypoints = [];
+    const avoid = [{ x: center.x, y: center.y }];
+
+    for (let i = 0; i < points; i++) {
+      const wp = randomSafeFloorTile(GUARD_CFG.radius, avoid);
+      waypoints.push({ x: wp.x, y: wp.y });
+      avoid.push({ x: wp.x, y: wp.y });
+    }
+
+    // Ensure at least 2 waypoints (if randomness collapses)
+    if (waypoints.length < 2) waypoints.push({ x: center.x + TILE*3, y: center.y });
+
+    return waypoints;
   }
 
   // =============================
@@ -494,21 +717,16 @@
   }
 
   function updatePowerups(dt) {
-    // Spawn timer (maintain maxOnMap)
     powerupSpawnTimer -= dt;
     if (powerupSpawnTimer <= 0) {
       powerupSpawnTimer = POWERUP_CFG.spawnInterval;
       if (powerups.length < POWERUP_CFG.maxOnMap) spawnPowerup();
     }
 
-    // TTL & pickup
     for (let i = powerups.length - 1; i >= 0; i--) {
       const p = powerups[i];
       p.ttl -= dt;
-      if (p.ttl <= 0) {
-        powerups.splice(i, 1);
-        continue;
-      }
+      if (p.ttl <= 0) { powerups.splice(i, 1); continue; }
 
       if (dist2(p.x, p.y, player.x, player.y) <= POWERUP_CFG.pickupRadius ** 2) {
         player.score += p.points;
@@ -530,8 +748,6 @@
   }
 
   function updateDamage(dt) {
-    // Cone contact / damage model:
-    // If player is seen by ANY guard right now, build contact timer; after grace, apply DPS.
     let seenNow = false;
     for (const g of guards) {
       if (canGuardSeePlayer(g)) { seenNow = true; break; }
@@ -552,16 +768,9 @@
   }
 
   function checkEndConditions() {
-    if (player.score >= GAME_CFG.targetScore) {
-      gameOver = true;
-      win = true;
-    } else if (gameTime <= 0) {
-      gameOver = true;
-      win = false;
-    } else if (player.hp <= 0) {
-      gameOver = true;
-      win = false;
-    }
+    if (player.score >= GAME_CFG.targetScore) { gameOver = true; win = true; }
+    else if (gameTime <= 0) { gameOver = true; win = false; }
+    else if (player.hp <= 0) { gameOver = true; win = false; }
   }
 
   // =============================
@@ -580,50 +789,9 @@
         }
       }
     }
-
-    if (DEBUG.drawUnreachableTint && REACH) {
-      ctx.save();
-      ctx.globalAlpha = 0.22;
-      ctx.fillStyle = "#ff7b72";
-      for (let y = 0; y < MAP_H; y++) {
-        for (let x = 0; x < MAP_W; x++) {
-          if (map[y][x] === 0 && !REACH.reachable[y][x]) {
-            ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
-          }
-        }
-      }
-      ctx.restore();
-    }
-
-    if (DEBUG.drawReachableTint && REACH) {
-      ctx.save();
-      ctx.globalAlpha = 0.08;
-      ctx.fillStyle = "#79c0ff";
-      for (let y = 0; y < MAP_H; y++) {
-        for (let x = 0; x < MAP_W; x++) {
-          if (REACH.reachable[y][x]) ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
-        }
-      }
-      ctx.restore();
-    }
-  }
-
-  function drawGuardPath(g) {
-    ctx.save();
-    ctx.globalAlpha = 0.20;
-    ctx.strokeStyle = "#79c0ff";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(g.waypoints[0].x, g.waypoints[0].y);
-    for (let i = 1; i < g.waypoints.length; i++) ctx.lineTo(g.waypoints[i].x, g.waypoints[i].y);
-    if (GUARD_CFG.patrolMode === "LOOP") ctx.lineTo(g.waypoints[0].x, g.waypoints[0].y);
-    ctx.stroke();
-    ctx.restore();
   }
 
   function drawGuard(g) {
-    if (DEBUG.drawGuardPaths) drawGuardPath(g);
-
     // Vision cone
     ctx.save();
     ctx.globalAlpha = 0.22;
@@ -655,13 +823,11 @@
   }
 
   function drawPlayer() {
-    // Spy
     ctx.beginPath();
     ctx.fillStyle = "#7ee787";
     ctx.arc(player.x, player.y, player.radius, 0, Math.PI*2);
     ctx.fill();
 
-    // Direction hint (based on movement keys)
     const mv = getMoveVector();
     if (mv.x !== 0 || mv.y !== 0) {
       ctx.beginPath();
@@ -673,8 +839,7 @@
 
   function drawPowerups() {
     for (const p of powerups) {
-      // Color by rarity
-      let c = "#a5d6ff"; // common-ish
+      let c = "#a5d6ff";
       if (p.points === 20) c = "#ffa657";
       if (p.points === 50) c = "#d2a8ff";
 
@@ -684,13 +849,11 @@
       ctx.save();
       ctx.globalAlpha = 0.95 * pulse;
 
-      // core
       ctx.beginPath();
       ctx.fillStyle = c;
       ctx.arc(p.x, p.y, 9, 0, Math.PI*2);
       ctx.fill();
 
-      // outer ring showing TTL
       ctx.globalAlpha = 0.35;
       ctx.strokeStyle = c;
       ctx.lineWidth = 2;
@@ -698,7 +861,6 @@
       ctx.arc(p.x, p.y, 14, -Math.PI/2, -Math.PI/2 + lifeRatio * Math.PI*2);
       ctx.stroke();
 
-      // point label
       ctx.globalAlpha = 0.85;
       ctx.fillStyle = "#0b0f14";
       ctx.font = "bold 11px system-ui";
@@ -745,7 +907,7 @@
     ctx.fillText(msg, canvas.width/2, canvas.height/2 + 18);
 
     ctx.font = "14px system-ui";
-    ctx.fillText("Press Restart to try again.", canvas.width/2, canvas.height/2 + 42);
+    ctx.fillText("Press Restart to generate a new connected map.", canvas.width/2, canvas.height/2 + 42);
 
     ctx.restore();
   }
@@ -775,10 +937,70 @@
   }
 
   // =============================
+  // Restart: generate map + safe spawns + patrol routes
+  // =============================
+  function restart() {
+    map = generateConnectedOpenMap();
+
+    // Player spawn (safe floor, near top-left interior)
+    const pSpawn = findSafeFloorSpawn(PLAYER_CFG.radius, { tx: 2, ty: 2 });
+
+    player = {
+      x: pSpawn.x,
+      y: pSpawn.y,
+      radius: PLAYER_CFG.radius,
+      speed: PLAYER_CFG.speed,
+      hp: GAME_CFG.maxHP,
+      score: 0,
+      coneContact: 0,
+    };
+    resolveCircleVsMap(player);
+
+    // Reachability for spawns/powerups
+    REACH = computeReachableFrom(player.x, player.y);
+
+    // Guards: spawn on walking areas far from player, and patrol points also on walking areas
+    const guardCount = 3;
+    guards = [];
+    const avoid = [{ x: player.x, y: player.y }];
+
+    for (let i = 0; i < guardCount; i++) {
+      const gSpawn = randomSafeFloorTile(GUARD_CFG.radius, avoid);
+      const route = makeRandomPatrolRoute(gSpawn, 4);
+      const g = makeGuard(gSpawn.x, gSpawn.y, route);
+
+      // Final safety pass
+      resolveCircleVsMap(g);
+      // If somehow overlapped after resolve, reposition once more
+      if (!isSafeCirclePosition(g.x, g.y, g.radius)) {
+        const retry = randomSafeFloorTile(GUARD_CFG.radius, avoid);
+        g.x = retry.x; g.y = retry.y;
+        resolveCircleVsMap(g);
+      }
+
+      guards.push(g);
+      avoid.push({ x: g.x, y: g.y });
+    }
+
+    // Powerups + timers
+    powerups = [];
+    floaters = [];
+    for (let i = 0; i < POWERUP_CFG.maxOnMap; i++) spawnPowerup(true);
+    powerupSpawnTimer = POWERUP_CFG.spawnInterval * 0.6;
+
+    gameTime = GAME_CFG.timeLimit;
+    gameOver = false;
+    win = false;
+
+    resetJoystick();
+  }
+
+  UI.restart.addEventListener("click", restart);
+
+  // =============================
   // Main Loop
   // =============================
   let lastT = performance.now();
-
   function tick(t) {
     const dt = clamp((t - lastT) / 1000, 0, 0.033);
     lastT = t;
