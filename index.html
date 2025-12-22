@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-  <title>Top-Down Stealth (Pac-Style Map + Mobile Joystick + Directional Spy + Gem Sprites)</title>
+  <title>Top-Down Stealth (Pac-Style + Title Screen + Mobile Joystick)</title>
   <style>
     :root { color-scheme: dark; }
     body { margin:0; background:#0b0f14; color:#e6edf3; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
@@ -152,8 +152,8 @@
   const TILE = 32;
   const MAP_W = 26;
   const MAP_H = 18;
-  const DESKTOP_W = MAP_W * TILE; // 832
-  const DESKTOP_H = MAP_H * TILE; // 576
+  const WORLD_W = MAP_W * TILE; // 832
+  const WORLD_H = MAP_H * TILE; // 576
 
   const GAME_CFG = { targetScore: 150, timeLimit: 75, maxHP: 100 };
 
@@ -184,10 +184,8 @@
     minSpawnDistFromPlayer: 2.5 * TILE,
   };
 
-  // spy/guard draw size (source can be 128x128; draw smaller)
   const SPRITE = { drawSize: 56 };
 
-  // gems are 32x32 sources; draw slightly smaller for spacing
   const GEM_DRAW = {
     size: 28,
     collectSize: 40,
@@ -195,26 +193,28 @@
   };
 
   // =============================
-  // Assets (UPDATED to match your folder screenshot)
+  // Assets (EDIT title path if needed)
   // =============================
   const ASSETS = {
     floor: "assets/floortexture.png",
     wall:  "assets/walltexture.png",
-    guard: "assets/guard.png", // optional; safe if missing
+    guard: "assets/guard.png",          // optional
+    title: "assets/titlescreen.png",    // <-- put your title image here
   };
 
+  // NOTE: your N/S were swapped, so we map files accordingly
   const SPY_FILES = {
-    n:  "assets/spyn.png",
+    n:  "assets/spys.png",
     ne: "assets/spyne.png",
     e:  "assets/spye.png",
     se: "assets/spyse.png",
-    s:  "assets/spys.png",
+    s:  "assets/spyn.png",
     sw: "assets/spysw.png",
     w:  "assets/spyw.png",
     nw: "assets/spynw.png",
   };
 
-  // Each gem has its own collect sprite now
+  // Each gem has its own collect animation sprite
   const GEM_FILES = {
     10: { gem: "assets/gem10.png", collect: "assets/gem10collect.png" },
     20: { gem: "assets/gem20.png", collect: "assets/gem20collect.png" },
@@ -231,7 +231,7 @@
   }
 
   // Loaded images
-  let floorImg, wallImg;
+  let floorImg, wallImg, titleImg;
   let floorPattern = null;
 
   const spySprites = {};          // key -> Image
@@ -243,6 +243,9 @@
   // collect animation instances: {x,y,ttl,points}
   let collectBursts = [];
 
+  // Game state
+  let gameState = "TITLE"; // "TITLE" | "PLAY" | "END"
+
   // =============================
   // Canvas sizing
   // =============================
@@ -250,10 +253,10 @@
     const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
 
     if (!isMobile) {
-      canvas.width = DESKTOP_W;
-      canvas.height = DESKTOP_H;
-      canvas.style.width = DESKTOP_W + "px";
-      canvas.style.height = DESKTOP_H + "px";
+      canvas.width = WORLD_W;
+      canvas.height = WORLD_H;
+      canvas.style.width = WORLD_W + "px";
+      canvas.style.height = WORLD_H + "px";
       return;
     }
 
@@ -262,7 +265,7 @@
     const uiEstimated = Math.min(360, window.innerHeight * 0.44);
     const heightCSS = Math.max(260, window.innerHeight - uiEstimated - padding);
 
-    const mapAspect = DESKTOP_W / DESKTOP_H;
+    const mapAspect = WORLD_W / WORLD_H;
     let w = widthCSS;
     let h = Math.round(w / mapAspect);
     if (h > heightCSS) { h = heightCSS; w = Math.round(h * mapAspect); }
@@ -365,6 +368,25 @@
     const keys = ["e","ne","n","nw","w","sw","s","se"];
     return keys[oct];
   }
+
+  // =============================
+  // Title Screen: start interaction
+  // =============================
+  function startGame() {
+    gameState = "PLAY";
+    restart(); // reset gameplay
+  }
+
+  function titleInteract() {
+    if (gameState === "TITLE") startGame();
+    else if (gameState === "END") { gameState = "TITLE"; }
+  }
+
+  window.addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+    if (k === "enter" || k === " " || k === "space") titleInteract();
+  });
+  canvas.addEventListener("pointerdown", () => titleInteract());
 
   // =============================
   // Pac-style map templates (1 wall, 0 floor)
@@ -858,9 +880,7 @@
     player.x += mv.x * player.speed * dt;
     player.y += mv.y * player.speed * dt;
     resolveCircleVsMap(player);
-
-    const key = dirKeyFromVector(mv.x, mv.y, player.facing || "s");
-    player.facing = key;
+    player.facing = dirKeyFromVector(mv.x, mv.y, player.facing || "s");
   }
 
   function updatePowerups(dt) {
@@ -877,14 +897,10 @@
 
       if (dist2(p.x,p.y, player.x,player.y) <= POWERUP_CFG.pickupRadius**2) {
         player.score += p.points;
-
-        // burst now stores which points type so it can pick the right collect sprite
         collectBursts.push({ x: p.x, y: p.y, ttl: GEM_DRAW.collectTTL, points: p.points });
-
         addFloater(p.x, p.y - 10, `+${p.points}`);
         UI.hud.classList.add("flash");
         setTimeout(() => UI.hud.classList.remove("flash"), 120);
-
         powerups.splice(i,1);
       }
     }
@@ -914,8 +930,8 @@
       player.coneContact += dt;
       if (player.coneContact >= PLAYER_CFG.damageGrace) {
         player.hp -= GUARD_CFG.dps * dt;
-        canvas.classList.add("flash");
-        setTimeout(() => canvas.classList.remove("flash"), 90);
+        UI.hud.classList.add("flash");
+        setTimeout(() => UI.hud.classList.remove("flash"), 90);
       }
     } else player.coneContact = 0;
 
@@ -923,9 +939,9 @@
   }
 
   function checkEndConditions() {
-    if (player.score >= GAME_CFG.targetScore) { gameOver = true; win = true; }
-    else if (gameTime <= 0) { gameOver = true; win = false; }
-    else if (player.hp <= 0) { gameOver = true; win = false; }
+    if (player.score >= GAME_CFG.targetScore) { gameOver = true; win = true; gameState = "END"; }
+    else if (gameTime <= 0) { gameOver = true; win = false; gameState = "END"; }
+    else if (player.hp <= 0) { gameOver = true; win = false; gameState = "END"; }
   }
 
   // =============================
@@ -933,26 +949,53 @@
   // =============================
   function beginWorldRender() {
     if (!isMobile) { ctx.setTransform(1, 0, 0, 1, 0, 0); return; }
-    const sx = canvas.width / DESKTOP_W;
-    const sy = canvas.height / DESKTOP_H;
+    const sx = canvas.width / WORLD_W;
+    const sy = canvas.height / WORLD_H;
     ctx.setTransform(sx, 0, 0, sy, 0, 0);
-  }
-
-  function drawMapTextured() {
-    if (floorPattern) {
-      ctx.fillStyle = floorPattern;
-      ctx.fillRect(0, 0, DESKTOP_W, DESKTOP_H);
-    } else {
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, DESKTOP_W, DESKTOP_H);
-    }
-    for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++)
-      if (map[y][x] === 1) ctx.drawImage(wallImg, x*TILE, y*TILE, TILE, TILE);
   }
 
   function drawSpriteCentered(img, x, y, size) {
     if (!img) return;
     ctx.drawImage(img, x - size/2, y - size/2, size, size);
+  }
+
+  function drawTitleScreen() {
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+
+    if (titleImg) {
+      const iw = titleImg.width, ih = titleImg.height;
+      const scale = Math.max(WORLD_W / iw, WORLD_H / ih);
+      const dw = iw * scale, dh = ih * scale;
+      const dx = (WORLD_W - dw) / 2;
+      const dy = (WORLD_H - dh) / 2;
+      ctx.drawImage(titleImg, dx, dy, dw, dh);
+    }
+
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(0, WORLD_H - 120, WORLD_W, 120);
+
+    ctx.fillStyle = "#e6edf3";
+    ctx.textAlign = "center";
+    ctx.font = "bold 28px system-ui";
+    ctx.fillText("TOP-DOWN STEALTH", WORLD_W/2, WORLD_H - 72);
+
+    ctx.font = "16px system-ui";
+    ctx.fillText(isMobile ? "Tap to Start" : "Click / Press Enter to Start", WORLD_W/2, WORLD_H - 40);
+    ctx.restore();
+  }
+
+  function drawMapTextured() {
+    if (floorPattern) {
+      ctx.fillStyle = floorPattern;
+      ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+    } else {
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+    }
+    for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++)
+      if (map[y][x] === 1) ctx.drawImage(wallImg, x*TILE, y*TILE, TILE, TILE);
   }
 
   function drawPowerups() {
@@ -964,12 +1007,6 @@
       ctx.save();
       ctx.globalAlpha = pulse;
       if (img) drawSpriteCentered(img, p.x, p.y, GEM_DRAW.size);
-      else {
-        ctx.beginPath();
-        ctx.fillStyle = "#a5d6ff";
-        ctx.arc(p.x, p.y, 9, 0, Math.PI * 2);
-        ctx.fill();
-      }
 
       ctx.globalAlpha = 0.45;
       ctx.strokeStyle = "#e6edf3";
@@ -1044,45 +1081,58 @@
     }
   }
 
-  function drawOverlay() {
-    if (!gameOver) return;
+  function drawEndOverlay() {
+    if (gameState !== "END") return;
     ctx.save();
-    ctx.globalAlpha = 0.78;
+    ctx.globalAlpha = 0.75;
     ctx.fillStyle = "#000";
-    ctx.fillRect(0, 0, DESKTOP_W, DESKTOP_H);
+    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
 
     ctx.globalAlpha = 1;
     ctx.fillStyle = "#e6edf3";
     ctx.textAlign = "center";
-
     ctx.font = "bold 40px system-ui";
-    ctx.fillText(win ? "MISSION COMPLETE" : "MISSION FAILED", DESKTOP_W/2, DESKTOP_H/2 - 14);
+    ctx.fillText(win ? "MISSION COMPLETE" : "MISSION FAILED", WORLD_W/2, WORLD_H/2 - 14);
 
     ctx.font = "16px system-ui";
     const msg = win ? "You hit the target score. Nice work."
       : (player.hp <= 0 ? "You took too much damage." : "You ran out of time.");
-    ctx.fillText(msg, DESKTOP_W/2, DESKTOP_H/2 + 18);
+    ctx.fillText(msg, WORLD_W/2, WORLD_H/2 + 18);
 
     ctx.font = "14px system-ui";
-    ctx.fillText("Press Restart to generate another Pac-style map.", DESKTOP_W/2, DESKTOP_H/2 + 42);
+    ctx.fillText(isMobile ? "Tap to return to Title" : "Click / Press Enter to return to Title", WORLD_W/2, WORLD_H/2 + 44);
     ctx.restore();
   }
 
   function render() {
     beginWorldRender();
+
+    if (gameState === "TITLE") {
+      drawTitleScreen();
+      return;
+    }
+
     drawMapTextured();
     drawPowerups();
     drawCollectBursts();
     for (const g of guards) drawGuard(g);
     drawPlayer();
     drawFloaters();
-    drawOverlay();
+    drawEndOverlay();
   }
 
   // =============================
   // HUD
   // =============================
   function updateHUD() {
+    if (gameState === "TITLE") {
+      UI.score.textContent = "0";
+      UI.time.textContent = GAME_CFG.timeLimit.toFixed(1);
+      UI.pcount.textContent = "0";
+      UI.hpBar.style.width = "100%";
+      return;
+    }
+
     UI.score.textContent = String(Math.floor(player.score));
     UI.target.textContent = String(GAME_CFG.targetScore);
     UI.time.textContent = gameTime.toFixed(1);
@@ -1096,6 +1146,16 @@
   // =============================
   // Restart
   // =============================
+  let map = null;
+  let powerups = [];
+  let floaters = [];
+  let guards = [];
+  let player = null;
+  let REACH = null;
+  let gameTime = GAME_CFG.timeLimit;
+  let gameOver = false;
+  let win = false;
+
   function restart() {
     map = generatePacStyleMap();
 
@@ -1157,10 +1217,12 @@
     gameTime = GAME_CFG.timeLimit;
     gameOver = false;
     win = false;
-
-    resetJoystick();
   }
-  UI.restart.addEventListener("click", restart);
+
+  UI.restart.addEventListener("click", () => {
+    if (gameState === "TITLE") startGame();
+    else { gameState = "PLAY"; restart(); }
+  });
 
   // =============================
   // Main Loop
@@ -1170,7 +1232,7 @@
     const dt = clamp((t - lastT) / 1000, 0, 0.033);
     lastT = t;
 
-    if (!gameOver) {
+    if (gameState === "PLAY" && !gameOver) {
       gameTime -= dt;
 
       updatePlayer(dt);
@@ -1190,15 +1252,15 @@
   }
 
   // =============================
-  // Boot (load textures + spy directional sprites + gems + per-gem collect)
+  // Boot
   // =============================
   async function boot() {
     sizeCanvasForDevice();
-
     try {
-      [floorImg, wallImg] = await Promise.all([
+      [floorImg, wallImg, titleImg] = await Promise.all([
         loadImage(ASSETS.floor),
         loadImage(ASSETS.wall),
+        loadImage(ASSETS.title), // REQUIRED (rename path above if needed)
       ]);
       floorPattern = ctx.createPattern(floorImg, "repeat");
 
@@ -1207,39 +1269,34 @@
         loadImage(SPY_FILES[k]).then(img => spySprites[k] = img)
       ));
 
-      // guard sprite optional
       guardSprite = await loadImage(ASSETS.guard).catch(() => null);
 
-      // gem sprites + unique collect sprites
       await Promise.all([
         loadImage(GEM_FILES[10].gem).then(img => gemSprites[10] = img),
         loadImage(GEM_FILES[20].gem).then(img => gemSprites[20] = img),
         loadImage(GEM_FILES[50].gem).then(img => gemSprites[50] = img),
-
         loadImage(GEM_FILES[10].collect).then(img => gemCollectSprites[10] = img),
         loadImage(GEM_FILES[20].collect).then(img => gemCollectSprites[20] = img),
         loadImage(GEM_FILES[50].collect).then(img => gemCollectSprites[50] = img),
       ]);
 
       UI.loading.style.display = "none";
-      restart();
+      gameState = "TITLE";
       requestAnimationFrame(tick);
     } catch (err) {
       UI.loading.textContent =
         "Could not load images. Confirm these exist in /assets:\n" +
         "floortexture.png, walltexture.png\n" +
+        "titlescreen.png (or update ASSETS.title)\n" +
         "spyn.png, spyne.png, spye.png, spyse.png, spys.png, spysw.png, spyw.png, spynw.png\n" +
-        "gem10.png, gem20.png, gem50.png\n" +
-        "gem10collect.png, gem20collect.png, gem50collect.png\n" +
+        "gem10.png gem20.png gem50.png\n" +
+        "gem10collect.png gem20collect.png gem50collect.png\n" +
         "(optional) guard.png\n\n" +
         "Tip: run via GitHub Pages / local server, not file://";
       console.error(err);
     }
   }
 
-  // =============================
-  // Start
-  // =============================
   boot();
 })();
 </script>
