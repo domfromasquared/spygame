@@ -44,7 +44,7 @@
     .loading {
       position: fixed; inset: 0;
       display: grid; place-items: center;
-      background: rgba(0,0,0,0.6);
+      background: rgba(0,0,0,0.72);
       color: #e6edf3; font-weight: 700;
       letter-spacing: 0.02em;
       white-space: pre-line;
@@ -62,6 +62,1107 @@
     }
     body.mobile .panel { width: 100%; order: 2; }
     body.mobile canvas { width: 100%; height: auto; order: 1; border-radius: 10px; }
+    body.mobile .hint { display: none; }
+  </style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+
+  <div class="panel">
+    <div class="hud" id="hud">
+      <div class="row"><div>Score</div><div id="score">0</div></div>
+      <div class="row"><div>Target</div><div id="target">150</div></div>
+      <div class="row"><div>Time</div><div id="time">75.0</div></div>
+
+      <div style="margin-top:10px;">Health</div>
+      <div class="bar"><div id="hpBar"></div></div>
+
+      <div class="row" style="margin-top:10px;"><div>Power-ups</div><div id="pcount">0</div></div>
+
+      <button id="restart">Restart</button>
+
+      <div class="joystickWrap" id="joyWrap">
+        <div class="joystickTitle">Mobile Joystick</div>
+        <div class="joystick" id="joy"><div class="joystickKnob" id="joyKnob"></div></div>
+        <div class="joystickNote">Drag the knob to move.</div>
+      </div>
+
+      <div class="hint">
+        Move: WASD / Arrow Keys / Joystick<br/>
+        Guards patrol to the end, <b>pause</b>, then <b>return</b>.<br/>
+        Guards chase only after spotting you; give up after losing line-of-sight.<br/>
+        <b>Score only comes from collecting gems.</b>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="loading" id="loading">Loading textures & sprites…</div>
+
+<script>
+(() => {
+  // ========= helpers =========
+  const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+  const dist2 = (ax,ay,bx,by)=>{const dx=bx-ax, dy=by-ay; return dx*dx+dy*dy;};
+  const norm = (x,y)=>{const l=Math.hypot(x,y)||1; return {x:x/l,y:y/l};};
+  const dot  = (ax,ay,bx,by)=>ax*bx+ay*by;
+  const lerp = (a,b,t)=>a+(b-a)*t;
+  const pick = (arr)=>arr[(Math.random()*arr.length)|0];
+  const randInt=(a,b)=>((a+Math.random()*(b-a+1))|0);
+
+  // ========= device / layout =========
+  const isMobile =
+    matchMedia("(pointer: coarse)").matches ||
+    /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+  if (isMobile) document.body.classList.add("mobile");
+
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+
+  const UI = {
+    loading: document.getElementById("loading"),
+    hud: document.getElementById("hud"),
+    score: document.getElementById("score"),
+    target: document.getElementById("target"),
+    time: document.getElementById("time"),
+    hpBar: document.getElementById("hpBar"),
+    pcount: document.getElementById("pcount"),
+    restart: document.getElementById("restart"),
+    joyWrap: document.getElementById("joyWrap"),
+    joy: document.getElementById("joy"),
+    joyKnob: document.getElementById("joyKnob"),
+  };
+  if (!isMobile) UI.joyWrap.style.display = "none";
+
+  // ========= config =========
+  const TILE = 32;
+  const MAP_W = 26, MAP_H = 18;
+  const WORLD_W = MAP_W*TILE; // 832
+  const WORLD_H = MAP_H*TILE; // 576
+
+  const GAME_CFG = { targetScore: 150, timeLimit: 75, maxHP: 100 };
+  const PLAYER_CFG = { radius: 12, speed: 175, damageGrace: 0.10 };
+
+  const GUARD_CFG = {
+    radius: 12,
+    patrolSpeed: 95,
+    chaseSpeed: 160, // slightly slower than spy
+    visionRange: 220,
+    coneHalfAngle: Math.PI/7,
+    dps: 26,
+    loseSightGrace: 1.2,
+    searchDuration: 2.0,
+    turnSmoothing: 10,
+    endPause: 1.1,
+    startPause: 0.6,
+    arriveEps: 6,
+    stuckSeconds: 0.45,
+    stuckMoveEps: 0.25,
+  };
+
+  const POWERUP_CFG = {
+    spawnInterval: 2.8,
+    maxOnMap: 3,
+    ttl: 7.0,
+    pickupRadius: 18,
+    minSpawnDistFromPlayer: 2.5*TILE,
+  };
+
+  const SPRITE = { drawSize: 56 };
+  const GEM_DRAW = { size: 28, collectSize: 40, collectTTL: 0.30 };
+
+  // ========= assets (MATCH YOUR SCREENSHOT EXACTLY) =========
+  const ASSETS = {
+    floor: "assets/floortexture.png",
+    wall:  "assets/walltexture.png",
+    title: "assets/titlescreen.png",
+    guard: "assets/guard.png", // optional
+  };
+
+  // Your N/S were backward, so map them swapped:
+  const SPY_FILES = {
+    n:  "assets/spys.png",
+    ne: "assets/spyne.png",
+    e:  "assets/spye.png",
+    se: "assets/spyse.png",
+    s:  "assets/spyn.png",
+    sw: "assets/spysw.png",
+    w:  "assets/spyw.png",
+    nw: "assets/spynw.png",
+  };
+
+  const GEM_FILES = {
+    10: { gem:"assets/gem10.png", collect:"assets/gem10collect.png" },
+    20: { gem:"assets/gem20.png", collect:"assets/gem20collect.png" },
+    50: { gem:"assets/gem50.png", collect:"assets/gem50collect.png" },
+  };
+
+  function loadImage(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => {
+        console.error("❌ FAILED IMAGE:", src);
+        reject(new Error("Failed to load: " + src));
+      };
+      img.src = src;
+    });
+  }
+
+  // ========= canvas sizing =========
+  function sizeCanvasForDevice() {
+    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+
+    if (!isMobile) {
+      canvas.width = WORLD_W;
+      canvas.height = WORLD_H;
+      canvas.style.width = WORLD_W + "px";
+      canvas.style.height = WORLD_H + "px";
+      return;
+    }
+
+    const padding = 20;
+    const widthCSS = Math.max(320, window.innerWidth - padding);
+    const uiEstimated = Math.min(360, window.innerHeight * 0.44);
+    const heightCSS = Math.max(260, window.innerHeight - uiEstimated - padding);
+
+    const aspect = WORLD_W / WORLD_H;
+    let w = widthCSS;
+    let h = Math.round(w / aspect);
+    if (h > heightCSS) { h = heightCSS; w = Math.round(h * aspect); }
+
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+  }
+  window.addEventListener("resize", sizeCanvasForDevice);
+
+  // ========= input =========
+  const keys = new Set();
+  window.addEventListener("keydown", e => keys.add(e.key.toLowerCase()));
+  window.addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+
+  const joystick = { active:false, id:null, vx:0, vy:0, max:50 };
+
+  function resetJoystick() {
+    joystick.active=false; joystick.id=null; joystick.vx=0; joystick.vy=0;
+    if (UI.joyKnob) UI.joyKnob.style.transform = "translate(0px,0px)";
+  }
+
+  function setJoystickVector(clientX, clientY) {
+    const r = UI.joy.getBoundingClientRect();
+    const cx = r.left + r.width/2, cy = r.top + r.height/2;
+    const dx = clientX - cx, dy = clientY - cy;
+    const d = Math.hypot(dx, dy) || 1;
+    const k = Math.min(1, joystick.max / d);
+    const nx = dx*k, ny = dy*k;
+    joystick.vx = clamp(nx/joystick.max, -1, 1);
+    joystick.vy = clamp(ny/joystick.max, -1, 1);
+    UI.joyKnob.style.transform = `translate(${nx}px, ${ny}px)`;
+  }
+
+  if (UI.joy) {
+    UI.joy.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      UI.joy.setPointerCapture(e.pointerId);
+      joystick.active = true;
+      joystick.id = e.pointerId;
+      setJoystickVector(e.clientX, e.clientY);
+    });
+    UI.joy.addEventListener("pointermove", (e) => {
+      if (!joystick.active || e.pointerId !== joystick.id) return;
+      e.preventDefault();
+      setJoystickVector(e.clientX, e.clientY);
+    });
+    UI.joy.addEventListener("pointerup", (e) => {
+      if (e.pointerId !== joystick.id) return;
+      e.preventDefault(); resetJoystick();
+    });
+    UI.joy.addEventListener("pointercancel", (e) => {
+      if (e.pointerId !== joystick.id) return;
+      e.preventDefault(); resetJoystick();
+    });
+  }
+
+  function getMoveVector() {
+    let x=0,y=0;
+    if (keys.has("w")||keys.has("arrowup")) y -= 1;
+    if (keys.has("s")||keys.has("arrowdown")) y += 1;
+    if (keys.has("a")||keys.has("arrowleft")) x -= 1;
+    if (keys.has("d")||keys.has("arrowright")) x += 1;
+
+    const kActive = (x||y);
+    const jActive = isMobile && (Math.abs(joystick.vx)>0.02 || Math.abs(joystick.vy)>0.02);
+
+    if (!kActive && jActive) {
+      const m = norm(joystick.vx, joystick.vy);
+      const mag = clamp(Math.hypot(joystick.vx, joystick.vy), 0, 1);
+      return { x: m.x*mag, y: m.y*mag };
+    }
+    if (kActive) return norm(x,y);
+    return {x:0,y:0};
+  }
+
+  function dirKeyFromVector(vx, vy, fallback="s") {
+    const mag = Math.hypot(vx, vy);
+    if (mag < 0.02) return fallback;
+    const a = Math.atan2(vy, vx);
+    const oct = Math.round(8 * a / (2 * Math.PI) + 8) % 8;
+    const keys = ["e","ne","n","nw","w","sw","s","se"];
+    return keys[oct];
+  }
+
+  // ========= title / state =========
+  let gameState = "TITLE"; // TITLE | PLAY | END
+  function titleInteract() {
+    if (gameState === "TITLE") startGame();
+    else if (gameState === "END") gameState = "TITLE";
+  }
+  function startGame() {
+    gameState = "PLAY";
+    restart();
+  }
+  window.addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+    if (k === "enter" || k === " " || k === "space") titleInteract();
+  });
+  canvas.addEventListener("pointerdown", () => titleInteract());
+
+  // ========= pac-style maps =========
+  const MAP_TEMPLATES = [
+    [
+      "11111111111111111111111111",
+      "10000000001100000000000001",
+      "10111111001100111110111101",
+      "10100001000000010000100001",
+      "10101101011111101011010101",
+      "10001101000110001011011001",
+      "11101101110110001101101111",
+      "10000000000100000000000001",
+      "10111111110101101111111101",
+      "10000000000101100000000001",
+      "11101101110111101101101111",
+      "10001101000100001011011001",
+      "10101101011111101011010101",
+      "10100001000000010000100001",
+      "10111111001100111110111101",
+      "10000000001100000000000001",
+      "10000000000000000000000001",
+      "11111111111111111111111111",
+    ],
+    [
+      "11111111111111111111111111",
+      "10000000000011000000000001",
+      "10111101111111011111011101",
+      "10100001000000010000100001",
+      "10101111011111101111111001",
+      "10001000010011001000001001",
+      "11111011010011001011011111",
+      "10000011000000000011000001",
+      "10111111011101110111111101",
+      "10100000011101110000000001",
+      "10101101111111111101101001",
+      "10001101000011000001011001",
+      "11101101011111011101011111",
+      "10000001000000010001000001",
+      "10111101111111011111011101",
+      "10000000000011000000000001",
+      "10000000000000000000000001",
+      "11111111111111111111111111",
+    ],
+    [
+      "11111111111111111111111111",
+      "10000000001100000000000001",
+      "10111111001100111110111101",
+      "10100000000000000000100001",
+      "10101111101111101111101001",
+      "10001000100011000010001001",
+      "11111010111011011101011111",
+      "10000010000000000001000001",
+      "10111110111101111101111101",
+      "10000000100101100100000001",
+      "11101111100111100111101111",
+      "10001000000100000000001001",
+      "10101111101111101111101001",
+      "10100000000000000000100001",
+      "10111111001100111110111101",
+      "10000000001100000000000001",
+      "10000000000000000000000001",
+      "11111111111111111111111111",
+    ],
+  ];
+
+  function parseTemplate(rows) { return rows.map(r => r.split("").map(c => c === "1" ? 1 : 0)); }
+  function flipH(m){ return m.map(row => row.slice().reverse()); }
+  function flipV(m){ return m.slice().reverse().map(r=>r.slice()); }
+
+  function isFullyConnected(m) {
+    let floorCount = 0, sx=-1, sy=-1;
+    for (let y=0;y<MAP_H;y++) for (let x=0;x<MAP_W;x++) {
+      if (m[y][x]===0) { floorCount++; if (sx<0){sx=x;sy=y;} }
+    }
+    if (floorCount===0) return false;
+
+    const q=[{x:sx,y:sy}];
+    const vis=Array.from({length:MAP_H},()=>Array(MAP_W).fill(false));
+    vis[sy][sx]=true; let reached=1;
+    const dirs=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+
+    while(q.length){
+      const p=q.shift();
+      for(const d of dirs){
+        const nx=p.x+d.x, ny=p.y+d.y;
+        if(nx<0||ny<0||nx>=MAP_W||ny>=MAP_H) continue;
+        if(vis[ny][nx]||m[ny][nx]===1) continue;
+        vis[ny][nx]=true; reached++; q.push({x:nx,y:ny});
+      }
+    }
+    return reached===floorCount;
+  }
+
+  function applyGateVariations(m) {
+    const dirs=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+    const candidates=[];
+    for(let y=1;y<MAP_H-1;y++) for(let x=1;x<MAP_W-1;x++){
+      if(m[y][x]!==1) continue;
+      let floorN=0;
+      for(const d of dirs) if(m[y+d.y][x+d.x]===0) floorN++;
+      if(floorN>=2) candidates.push({x,y});
+    }
+    const toggles=Math.min(8,candidates.length);
+    for(let i=0;i<toggles;i++){
+      const g=candidates[randInt(0,candidates.length-1)];
+      m[g.y][g.x]=0;
+      if(!isFullyConnected(m)) m[g.y][g.x]=1;
+    }
+    return m;
+  }
+
+  function generatePacMap() {
+    let m=parseTemplate(pick(MAP_TEMPLATES));
+    if(Math.random()<0.5) m=flipH(m);
+    if(Math.random()<0.25) m=flipV(m);
+    m=applyGateVariations(m);
+    if(!isFullyConnected(m)) m=parseTemplate(pick(MAP_TEMPLATES));
+    return m;
+  }
+
+  // ========= collision / LOS =========
+  let map;
+
+  const isWallTile = (tx,ty)=> (tx<0||ty<0||tx>=MAP_W||ty>=MAP_H) ? true : map[ty][tx]===1;
+  const worldToTile=(x,y)=>({tx:Math.floor(x/TILE), ty:Math.floor(y/TILE)});
+
+  function resolveCircleVsMap(ent) {
+    const r=ent.radius;
+    const minTx=Math.floor((ent.x-r)/TILE), maxTx=Math.floor((ent.x+r)/TILE);
+    const minTy=Math.floor((ent.y-r)/TILE), maxTy=Math.floor((ent.y+r)/TILE);
+
+    for(let ty=minTy; ty<=maxTy; ty++) for(let tx=minTx; tx<=maxTx; tx++){
+      if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H) continue;
+      if(map[ty][tx]!==1) continue;
+
+      const left=tx*TILE, top=ty*TILE, right=left+TILE, bottom=top+TILE;
+      const cx=clamp(ent.x,left,right), cy=clamp(ent.y,top,bottom);
+      const dx=ent.x-cx, dy=ent.y-cy;
+      const d2=dx*dx+dy*dy;
+      if(d2<r*r){
+        const d=Math.sqrt(d2)||0.0001;
+        const push=r-d;
+        ent.x += (dx/d)*push;
+        ent.y += (dy/d)*push;
+      }
+    }
+  }
+
+  function isSafeCirclePosition(x,y,radius){
+    const t={x,y,radius}; const bx=t.x, by=t.y;
+    resolveCircleVsMap(t);
+    return dist2(bx,by,t.x,t.y) < 1;
+  }
+
+  function hasLineOfSight(ax,ay,bx,by){
+    const dx=bx-ax, dy=by-ay, d=Math.hypot(dx,dy);
+    if(d<1) return true;
+    const steps=Math.ceil(d/8);
+    const sx=dx/steps, sy=dy/steps;
+    let x=ax, y=ay;
+    for(let i=0;i<steps;i++){
+      const t=worldToTile(x,y);
+      if(isWallTile(t.tx,t.ty)) return false;
+      x+=sx; y+=sy;
+    }
+    return true;
+  }
+
+  function computeReachableFrom(sx,sy){
+    const s=worldToTile(sx,sy);
+    const reachable=Array.from({length:MAP_H},()=>Array(MAP_W).fill(false));
+    if(isWallTile(s.tx,s.ty)) return {tiles:[], reachable};
+
+    const q=[{tx:s.tx, ty:s.ty}];
+    reachable[s.ty][s.tx]=true;
+    const dirs=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+
+    while(q.length){
+      const p=q.shift();
+      for(const d of dirs){
+        const nx=p.tx+d.x, ny=p.ty+d.y;
+        if(nx<0||ny<0||nx>=MAP_W||ny>=MAP_H) continue;
+        if(reachable[ny][nx]||isWallTile(nx,ny)) continue;
+        reachable[ny][nx]=true;
+        q.push({tx:nx, ty:ny});
+      }
+    }
+
+    const tiles=[];
+    for(let y=0;y<MAP_H;y++) for(let x=0;x<MAP_W;x++){
+      if(map[y][x]===0 && reachable[y][x]) tiles.push({tx:x, ty:y});
+    }
+    return {tiles, reachable};
+  }
+
+  function findSafeFloorSpawn(radius, prefer={tx:2,ty:2}){
+    const candidates=[];
+    for(let y=1;y<MAP_H-1;y++) for(let x=1;x<MAP_W-1;x++){
+      if(map[y][x]!==0) continue;
+      candidates.push({tx:x, ty:y, d:Math.abs(x-prefer.tx)+Math.abs(y-prefer.ty)});
+    }
+    candidates.sort((a,b)=>a.d-b.d);
+    for(let i=0;i<Math.min(240,candidates.length);i++){
+      const t=candidates[i];
+      const x=(t.tx+0.5)*TILE, y=(t.ty+0.5)*TILE;
+      if(isSafeCirclePosition(x,y,radius)) return {x,y,tx:t.tx,ty:t.ty};
+    }
+    const t=pick(candidates);
+    return {x:(t.tx+0.5)*TILE, y:(t.ty+0.5)*TILE, tx:t.tx,ty:t.ty};
+  }
+
+  // ========= game state =========
+  let player, guards, powerups, floaters, collectBursts, REACH;
+  let gameTime, gameOver, win;
+  let powerupSpawnTimer=0;
+
+  function randomPointsValue(){
+    const r=Math.random();
+    if(r<0.70) return 10;
+    if(r<0.93) return 20;
+    return 50;
+  }
+
+  function addFloater(x,y,text){ floaters.push({x,y,text,ttl:0.9,vy:-28}); }
+
+  // ========= powerups =========
+  function randomReachablePosition(){
+    for(let i=0;i<180;i++){
+      const t=pick(REACH.tiles);
+      const x=(t.tx+0.5)*TILE, y=(t.ty+0.5)*TILE;
+      if(dist2(x,y,player.x,player.y) < POWERUP_CFG.minSpawnDistFromPlayer**2) continue;
+      if(!isSafeCirclePosition(x,y,10)) continue;
+      let tooClose=false;
+      for(const p of powerups){
+        if(dist2(x,y,p.x,p.y) < (TILE*1.0)**2){ tooClose=true; break; }
+      }
+      if(tooClose) continue;
+      return {x,y};
+    }
+    const t=pick(REACH.tiles);
+    return {x:(t.tx+0.5)*TILE, y:(t.ty+0.5)*TILE};
+  }
+
+  function spawnPowerup(force=false){
+    if(!force && powerups.length>=POWERUP_CFG.maxOnMap) return;
+    const pos=randomReachablePosition();
+    powerups.push({x:pos.x,y:pos.y,ttl:POWERUP_CFG.ttl,points:randomPointsValue()});
+  }
+
+  // ========= guards =========
+  function makeGuard(x,y,waypoints){
+    return {
+      x,y,radius:GUARD_CFG.radius,
+      state:"PATROL",
+      waypoints,
+      wpIndex:0,
+      forward:true,
+      pauseTimer:0,
+      dirX:1, dirY:0,
+      lastSeenX:x, lastSeenY:y,
+      timeSinceSeen:999,
+      searchTimer:0,
+      stuckTime:0,
+      lastX:x, lastY:y,
+    };
+  }
+
+  function guardUnstuck(g, dt, trying){
+    const moved=Math.hypot(g.x-g.lastX, g.y-g.lastY);
+    g.lastX=g.x; g.lastY=g.y;
+    if(trying && moved < GUARD_CFG.stuckMoveEps) g.stuckTime += dt;
+    else g.stuckTime = 0;
+
+    if(g.stuckTime > GUARD_CFG.stuckSeconds){
+      g.stuckTime = 0;
+      if(g.state==="PATROL") stepPatrolIndex(g);
+      else {
+        const t=performance.now()*0.001;
+        g.dirX=Math.cos(t*3.0);
+        g.dirY=Math.sin(t*3.0);
+      }
+    }
+  }
+
+  function canGuardSeePlayer(g){
+    const vx=player.x-g.x, vy=player.y-g.y;
+    const d=Math.hypot(vx,vy);
+    if(d>GUARD_CFG.visionRange) return false;
+
+    const v={x:vx/(d||1), y:vy/(d||1)};
+    const dir=norm(g.dirX,g.dirY);
+    const c=clamp(dot(v.x,v.y,dir.x,dir.y), -1, 1);
+    const ang=Math.acos(c);
+    if(ang>GUARD_CFG.coneHalfAngle) return false;
+
+    return hasLineOfSight(g.x,g.y,player.x,player.y);
+  }
+
+  function moveTowards(ent, tx, ty, speed, dt){
+    const dx=tx-ent.x, dy=ty-ent.y;
+    const d=Math.hypot(dx,dy);
+    if(d<0.001) return true;
+    const vx=dx/d, vy=dy/d;
+
+    ent.x += vx*speed*dt;
+    ent.y += vy*speed*dt;
+
+    ent.dirX = lerp(ent.dirX, vx, clamp(GUARD_CFG.turnSmoothing*dt,0,1));
+    ent.dirY = lerp(ent.dirY, vy, clamp(GUARD_CFG.turnSmoothing*dt,0,1));
+    return d < GUARD_CFG.arriveEps;
+  }
+
+  function stepPatrolIndex(g){
+    if(g.forward){
+      if(g.wpIndex >= g.waypoints.length-1){
+        g.state="PAUSE_END"; g.pauseTimer=GUARD_CFG.endPause; g.forward=false;
+      } else g.wpIndex++;
+    } else {
+      if(g.wpIndex<=0){
+        g.state="PAUSE_START"; g.pauseTimer=GUARD_CFG.startPause; g.forward=true;
+      } else g.wpIndex--;
+    }
+  }
+
+  function updateGuardPatrol(g, dt){
+    if(g.state==="PAUSE_END" || g.state==="PAUSE_START"){
+      g.pauseTimer -= dt;
+      const t=performance.now()*0.001;
+      g.dirX=Math.cos(t*1.2);
+      g.dirY=Math.sin(t*1.2);
+      guardUnstuck(g, dt, false);
+      if(g.pauseTimer<=0) g.state="PATROL";
+      return;
+    }
+    const wp=g.waypoints[g.wpIndex];
+    const reached=moveTowards(g, wp.x, wp.y, GUARD_CFG.patrolSpeed, dt);
+    resolveCircleVsMap(g);
+    guardUnstuck(g, dt, true);
+    if(reached) stepPatrolIndex(g);
+  }
+
+  function updateGuard(g, dt){
+    const sees=canGuardSeePlayer(g);
+    if(sees){
+      g.lastSeenX=player.x; g.lastSeenY=player.y;
+      g.timeSinceSeen=0;
+      if(g.state!=="CHASE") g.state="CHASE";
+    } else g.timeSinceSeen += dt;
+
+    if(g.state==="CHASE"){
+      moveTowards(g, g.lastSeenX, g.lastSeenY, GUARD_CFG.chaseSpeed, dt);
+      resolveCircleVsMap(g);
+      guardUnstuck(g, dt, true);
+      if(g.timeSinceSeen > GUARD_CFG.loseSightGrace){
+        g.state="SEARCH"; g.searchTimer=GUARD_CFG.searchDuration;
+      }
+    } else if(g.state==="SEARCH"){
+      const atLast=moveTowards(g, g.lastSeenX, g.lastSeenY, GUARD_CFG.patrolSpeed, dt);
+      resolveCircleVsMap(g);
+      guardUnstuck(g, dt, true);
+      if(atLast){
+        g.searchTimer -= dt;
+        const t=performance.now()*0.001;
+        g.dirX=Math.cos(t*1.8);
+        g.dirY=Math.sin(t*1.8);
+        if(g.searchTimer<=0) g.state="PATROL";
+      }
+    } else updateGuardPatrol(g, dt);
+  }
+
+  // corridor-following patrol route builder
+  function neighborsFloor(tx,ty){
+    const dirs=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+    const res=[];
+    for(const d of dirs){
+      const nx=tx+d.x, ny=ty+d.y;
+      if(nx<=0||ny<=0||nx>=MAP_W-1||ny>=MAP_H-1) continue;
+      if(map[ny][nx]===0) res.push({tx:nx, ty:ny});
+    }
+    return res;
+  }
+
+  function makeGridPatrolRoute(startTx,startTy, steps=85){
+    let tx=startTx, ty=startTy;
+    const path=[{tx,ty}];
+    const visited=new Set([`${tx},${ty}`]);
+
+    for(let i=0;i<steps;i++){
+      const n=neighborsFloor(tx,ty);
+      if(n.length===0) break;
+
+      const prev = path.length>=2 ? path[path.length-2] : null;
+      let preferred=null;
+      if(prev){
+        const dx=tx-prev.tx, dy=ty-prev.ty;
+        preferred = n.find(p => (p.tx-tx)===dx && (p.ty-ty)===dy);
+      }
+
+      const unvisited=n.filter(p=>!visited.has(`${p.tx},${p.ty}`));
+      let next=null;
+      if(preferred && Math.random()<0.65) next=preferred;
+      else if(unvisited.length && Math.random()<0.75) next=pick(unvisited);
+      else next=pick(n);
+
+      tx=next.tx; ty=next.ty;
+      path.push({tx,ty});
+      visited.add(`${tx},${ty}`);
+    }
+
+    const waypoints=[];
+    const stride=7;
+    for(let i=0;i<path.length;i+=stride){
+      const p=path[i];
+      waypoints.push({x:(p.tx+0.5)*TILE, y:(p.ty+0.5)*TILE});
+    }
+    const last=path[path.length-1];
+    waypoints.push({x:(last.tx+0.5)*TILE, y:(last.ty+0.5)*TILE});
+    if(waypoints.length<3){
+      waypoints.push({x:(startTx+2.5)*TILE, y:(startTy+0.5)*TILE});
+      waypoints.push({x:(startTx+2.5)*TILE, y:(startTy+3.5)*TILE});
+    }
+    return waypoints;
+  }
+
+  // ========= gameplay update =========
+  function updatePlayer(dt){
+    const mv=getMoveVector();
+    player.x += mv.x*player.speed*dt;
+    player.y += mv.y*player.speed*dt;
+    resolveCircleVsMap(player);
+    player.facing = dirKeyFromVector(mv.x, mv.y, player.facing || "s");
+  }
+
+  function updatePowerups(dt){
+    powerupSpawnTimer -= dt;
+    if(powerupSpawnTimer<=0){
+      powerupSpawnTimer = POWERUP_CFG.spawnInterval;
+      if(powerups.length < POWERUP_CFG.maxOnMap) spawnPowerup();
+    }
+
+    for(let i=powerups.length-1;i>=0;i--){
+      const p=powerups[i];
+      p.ttl -= dt;
+      if(p.ttl<=0){ powerups.splice(i,1); continue; }
+
+      if(dist2(p.x,p.y,player.x,player.y) <= POWERUP_CFG.pickupRadius**2){
+        player.score += p.points;
+        collectBursts.push({x:p.x,y:p.y,ttl:GEM_DRAW.collectTTL,points:p.points});
+        addFloater(p.x, p.y-10, `+${p.points}`);
+        UI.hud.classList.add("flash");
+        setTimeout(()=>UI.hud.classList.remove("flash"), 120);
+        powerups.splice(i,1);
+      }
+    }
+  }
+
+  function updateCollectBursts(dt){
+    for(let i=collectBursts.length-1;i>=0;i--){
+      collectBursts[i].ttl -= dt;
+      if(collectBursts[i].ttl<=0) collectBursts.splice(i,1);
+    }
+  }
+
+  function updateFloaters(dt){
+    for(let i=floaters.length-1;i>=0;i--){
+      const f=floaters[i];
+      f.ttl -= dt;
+      f.y += f.vy*dt;
+      if(f.ttl<=0) floaters.splice(i,1);
+    }
+  }
+
+  function updateDamage(dt){
+    let seen=false;
+    for(const g of guards){ if(canGuardSeePlayer(g)){ seen=true; break; } }
+    if(seen){
+      player.coneContact += dt;
+      if(player.coneContact >= PLAYER_CFG.damageGrace){
+        player.hp -= GUARD_CFG.dps*dt;
+        UI.hud.classList.add("flash");
+        setTimeout(()=>UI.hud.classList.remove("flash"), 90);
+      }
+    } else {
+      player.coneContact = 0;
+    }
+    player.hp = clamp(player.hp, 0, GAME_CFG.maxHP);
+  }
+
+  function checkEndConditions(){
+    if(player.score >= GAME_CFG.targetScore){ gameOver=true; win=true; gameState="END"; }
+    else if(gameTime<=0){ gameOver=true; win=false; gameState="END"; }
+    else if(player.hp<=0){ gameOver=true; win=false; gameState="END"; }
+  }
+
+  // ========= rendering =========
+  let floorImg, wallImg, titleImg, guardSprite;
+  let floorPattern=null;
+  const spySprites={}, gemSprites={}, gemCollectSprites={};
+
+  function beginWorldRender(){
+    if(!isMobile){ ctx.setTransform(1,0,0,1,0,0); return; }
+    const sx=canvas.width/WORLD_W, sy=canvas.height/WORLD_H;
+    ctx.setTransform(sx,0,0,sy,0,0);
+  }
+
+  function drawSpriteCentered(img,x,y,size){
+    if(!img) return;
+    ctx.drawImage(img, x-size/2, y-size/2, size, size);
+  }
+
+  function drawTitleScreen(){
+    ctx.fillStyle="#000";
+    ctx.fillRect(0,0,WORLD_W,WORLD_H);
+
+    if(titleImg){
+      const iw=titleImg.width, ih=titleImg.height;
+      const scale=Math.max(WORLD_W/iw, WORLD_H/ih);
+      const dw=iw*scale, dh=ih*scale;
+      const dx=(WORLD_W-dw)/2, dy=(WORLD_H-dh)/2;
+      ctx.drawImage(titleImg, dx, dy, dw, dh);
+    }
+
+    ctx.save();
+    ctx.fillStyle="rgba(0,0,0,0.45)";
+    ctx.fillRect(0, WORLD_H-120, WORLD_W, 120);
+    ctx.fillStyle="#e6edf3";
+    ctx.textAlign="center";
+    ctx.font="bold 28px system-ui";
+    ctx.fillText("TOP-DOWN STEALTH", WORLD_W/2, WORLD_H-72);
+    ctx.font="16px system-ui";
+    ctx.fillText(isMobile ? "Tap to Start" : "Click / Press Enter to Start", WORLD_W/2, WORLD_H-40);
+    ctx.restore();
+  }
+
+  function drawMap(){
+    if(floorPattern){
+      ctx.fillStyle=floorPattern;
+      ctx.fillRect(0,0,WORLD_W,WORLD_H);
+    } else {
+      ctx.fillStyle="#000";
+      ctx.fillRect(0,0,WORLD_W,WORLD_H);
+    }
+    for(let y=0;y<MAP_H;y++) for(let x=0;x<MAP_W;x++){
+      if(map[y][x]===1) ctx.drawImage(wallImg, x*TILE, y*TILE, TILE, TILE);
+    }
+  }
+
+  function drawPowerups(){
+    for(const p of powerups){
+      const img=gemSprites[p.points];
+      const life=clamp(p.ttl/POWERUP_CFG.ttl,0,1);
+      const pulse=0.85 + 0.15*Math.sin((POWERUP_CFG.ttl-p.ttl)*7);
+
+      ctx.save();
+      ctx.globalAlpha=pulse;
+      if(img) drawSpriteCentered(img,p.x,p.y,GEM_DRAW.size);
+      ctx.globalAlpha=0.45;
+      ctx.strokeStyle="#e6edf3";
+      ctx.lineWidth=2;
+      ctx.beginPath();
+      ctx.arc(p.x,p.y,16,-Math.PI/2, -Math.PI/2 + life*Math.PI*2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawCollectBursts(){
+    for(const b of collectBursts){
+      const img=gemCollectSprites[b.points];
+      if(!img) continue;
+      const t=1-(b.ttl/GEM_DRAW.collectTTL);
+      const size=lerp(GEM_DRAW.collectSize*0.7, GEM_DRAW.collectSize*1.15, t);
+      const alpha=1-t;
+      ctx.save();
+      ctx.globalAlpha=alpha;
+      drawSpriteCentered(img,b.x,b.y,size);
+      ctx.restore();
+    }
+  }
+
+  function drawGuard(g){
+    // cone
+    ctx.save();
+    ctx.globalAlpha=0.22;
+    ctx.fillStyle=(g.state==="CHASE") ? "#ff7b72" : "#79c0ff";
+    const dir=norm(g.dirX,g.dirY);
+    const a0=Math.atan2(dir.y,dir.x);
+    ctx.beginPath();
+    ctx.moveTo(g.x,g.y);
+    ctx.arc(g.x,g.y, GUARD_CFG.visionRange, a0-GUARD_CFG.coneHalfAngle, a0+GUARD_CFG.coneHalfAngle);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    if(guardSprite) drawSpriteCentered(guardSprite,g.x,g.y,SPRITE.drawSize);
+    else {
+      ctx.beginPath();
+      ctx.fillStyle=(g.state==="CHASE") ? "#ff7b72" : "#c9d1d9";
+      ctx.arc(g.x,g.y,g.radius,0,Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+  function drawPlayer(){
+    const img=spySprites[player.facing || "s"];
+    if(img) drawSpriteCentered(img, player.x, player.y, SPRITE.drawSize);
+    else {
+      ctx.beginPath();
+      ctx.fillStyle="#7ee787";
+      ctx.arc(player.x,player.y,player.radius,0,Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+  function drawFloaters(){
+    for(const f of floaters){
+      const a=clamp(f.ttl/0.9,0,1);
+      ctx.save();
+      ctx.globalAlpha=a;
+      ctx.fillStyle="#e6edf3";
+      ctx.font="bold 14px system-ui";
+      ctx.textAlign="center";
+      ctx.fillText(f.text, f.x, f.y);
+      ctx.restore();
+    }
+  }
+
+  function drawEndOverlay(){
+    if(gameState!=="END") return;
+    ctx.save();
+    ctx.globalAlpha=0.75;
+    ctx.fillStyle="#000";
+    ctx.fillRect(0,0,WORLD_W,WORLD_H);
+    ctx.globalAlpha=1;
+    ctx.fillStyle="#e6edf3";
+    ctx.textAlign="center";
+    ctx.font="bold 40px system-ui";
+    ctx.fillText(win ? "MISSION COMPLETE" : "MISSION FAILED", WORLD_W/2, WORLD_H/2 - 14);
+    ctx.font="16px system-ui";
+    const msg = win ? "You hit the target score." : (player.hp<=0 ? "You took too much damage." : "You ran out of time.");
+    ctx.fillText(msg, WORLD_W/2, WORLD_H/2 + 18);
+    ctx.font="14px system-ui";
+    ctx.fillText(isMobile ? "Tap / Enter to return to title" : "Click / Enter to return to title", WORLD_W/2, WORLD_H/2 + 44);
+    ctx.restore();
+  }
+
+  function render(){
+    beginWorldRender();
+    if(gameState==="TITLE"){ drawTitleScreen(); return; }
+    drawMap();
+    drawPowerups();
+    drawCollectBursts();
+    for(const g of guards) drawGuard(g);
+    drawPlayer();
+    drawFloaters();
+    drawEndOverlay();
+  }
+
+  // ========= HUD =========
+  function updateHUD(){
+    UI.target.textContent = String(GAME_CFG.targetScore);
+
+    if(gameState==="TITLE"){
+      UI.score.textContent="0";
+      UI.time.textContent=GAME_CFG.timeLimit.toFixed(1);
+      UI.pcount.textContent="0";
+      UI.hpBar.style.width="100%";
+      UI.hpBar.style.background="#2f81f7";
+      return;
+    }
+
+    UI.score.textContent = String(Math.floor(player.score));
+    UI.time.textContent  = gameTime.toFixed(1);
+    UI.pcount.textContent= String(powerups.length);
+    const hpPct=(player.hp/GAME_CFG.maxHP)*100;
+    UI.hpBar.style.width=`${hpPct}%`;
+    UI.hpBar.style.background=(player.hp<35) ? "#ff7b72" : "#2f81f7";
+  }
+
+  // ========= restart =========
+  function restart(){
+    map = generatePacMap();
+
+    const pSpawn = findSafeFloorSpawn(PLAYER_CFG.radius, {tx:2,ty:2});
+    player = {
+      x:pSpawn.x, y:pSpawn.y,
+      radius:PLAYER_CFG.radius,
+      speed:PLAYER_CFG.speed,
+      hp:GAME_CFG.maxHP,
+      score:0,
+      coneContact:0,
+      facing:"s",
+    };
+    resolveCircleVsMap(player);
+
+    REACH = computeReachableFrom(player.x, player.y);
+
+    guards = [];
+    const used=[{x:player.x,y:player.y}];
+    const guardCount=3;
+
+    for(let i=0;i<guardCount;i++){
+      let chosen=null;
+      for(let tries=0; tries<900; tries++){
+        const cand=pick(REACH.tiles);
+        const x=(cand.tx+0.5)*TILE, y=(cand.ty+0.5)*TILE;
+        if(!isSafeCirclePosition(x,y,GUARD_CFG.radius)) continue;
+        if(dist2(x,y,player.x,player.y) < (TILE*7)**2) continue;
+
+        let ok=true;
+        for(const u of used){
+          if(dist2(x,y,u.x,u.y) < (TILE*4)**2){ ok=false; break; }
+        }
+        if(!ok) continue;
+        chosen={tx:cand.tx, ty:cand.ty, x,y};
+        break;
+      }
+      if(!chosen){
+        const cand=pick(REACH.tiles);
+        chosen={tx:cand.tx,ty:cand.ty,x:(cand.tx+0.5)*TILE,y:(cand.ty+0.5)*TILE};
+      }
+
+      const waypoints = makeGridPatrolRoute(chosen.tx, chosen.ty, 85);
+      const g = makeGuard(chosen.x, chosen.y, waypoints);
+      resolveCircleVsMap(g);
+      guards.push(g);
+      used.push({x:g.x,y:g.y});
+    }
+
+    powerups = [];
+    floaters = [];
+    collectBursts = [];
+
+    for(let i=0;i<POWERUP_CFG.maxOnMap;i++) spawnPowerup(true);
+    powerupSpawnTimer = POWERUP_CFG.spawnInterval * 0.6;
+
+    gameTime = GAME_CFG.timeLimit;
+    gameOver = false;
+    win = false;
+
+    resetJoystick();
+  }
+
+  UI.restart.addEventListener("click", () => {
+    if(gameState==="TITLE") startGame();
+    else { gameState="PLAY"; restart(); }
+  });
+
+  // ========= loop =========
+  let lastT = performance.now();
+  function tick(t){
+    const dt=clamp((t-lastT)/1000,0,0.033);
+    lastT=t;
+
+    if(gameState==="PLAY" && !gameOver){
+      gameTime -= dt;
+      updatePlayer(dt);
+      for(const g of guards) updateGuard(g,dt);
+      updatePowerups(dt);
+      updateCollectBursts(dt);
+      updateFloaters(dt);
+      updateDamage(dt);
+      checkEndConditions();
+    }
+
+    updateHUD();
+    render();
+    requestAnimationFrame(tick);
+  }
+
+  // ========= boot =========
+  async function boot(){
+    sizeCanvasForDevice();
+
+    // Required assets list (if any fail, we show exactly which)
+    const required = [
+      ASSETS.floor, ASSETS.wall, ASSETS.title,
+      ...Object.values(SPY_FILES),
+      GEM_FILES[10].gem, GEM_FILES[20].gem, GEM_FILES[50].gem,
+      GEM_FILES[10].collect, GEM_FILES[20].collect, GEM_FILES[50].collect,
+    ];
+
+    try {
+      // Load required sequentially so console shows exactly what breaks
+      for(const src of required){
+        await loadImage(src);
+        console.log("✅ loaded", src);
+      }
+
+      // Store images
+      floorImg = await loadImage(ASSETS.floor);
+      wallImg  = await loadImage(ASSETS.wall);
+      titleImg = await loadImage(ASSETS.title);
+      floorPattern = ctx.createPattern(floorImg, "repeat");
+
+      for(const [k,src] of Object.entries(SPY_FILES)){
+        spySprites[k] = await loadImage(src);
+      }
+
+      gemSprites[10] = await loadImage(GEM_FILES[10].gem);
+      gemSprites[20] = await loadImage(GEM_FILES[20].gem);
+      gemSprites[50] = await loadImage(GEM_FILES[50].gem);
+
+      gemCollectSprites[10] = await loadImage(GEM_FILES[10].collect);
+      gemCollectSprites[20] = await loadImage(GEM_FILES[20].collect);
+      gemCollectSprites[50] = await loadImage(GEM_FILES[50].collect);
+
+      // Optional guard
+      guardSprite = await loadImage(ASSETS.guard).catch(() => null);
+
+      UI.loading.style.display="none";
+      gameState="TITLE";
+      requestAnimationFrame(tick);
+
+    } catch(err){
+      UI.loading.textContent =
+        "❌ Image load failed.\n\n" +
+        err.message + "\n\n" +
+        "Open DevTools → Console.\n" +
+        "Look for:  ❌ FAILED IMAGE: ...\n\n" +
+        "Most common causes:\n" +
+        "• Opening index.html via file:// (use a local server)\n" +
+        "• GitHub Pages case-sensitivity mismatch\n" +
+        "• Wrong folder depth (assets folder not next to index.html)\n";
+      console.error(err);
+    }
+  }
+
+  boot();
+})();
+</script>
+</body>
+</html>
     body.mobile .hint { display: none; }
   </style>
 </head>
