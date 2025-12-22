@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-  <title>Top-Down Stealth (Pac-Style + Title Screen + Mobile Joystick)</title>
+  <title>Top-Down Stealth (Occluded Vision Cone + Rotating Guard Sprite)</title>
   <style>
     :root { color-scheme: dark; }
     body { margin:0; background:#0b0f14; color:#e6edf3; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
@@ -21,7 +21,6 @@
     .flash { animation: flash 140ms ease-in-out; }
     @keyframes flash { from { filter: brightness(1.8); } to { filter: brightness(1); } }
 
-    /* Mobile joystick */
     .joystickWrap { margin-top: 12px; padding-top: 12px; border-top: 1px solid #243244; }
     .joystickTitle { font-weight: 600; margin-bottom: 8px; opacity: 0.95; }
     .joystick {
@@ -53,7 +52,6 @@
       z-index: 9999;
     }
 
-    /* MOBILE layout */
     body.mobile #wrap {
       padding: 10px;
       gap: 10px;
@@ -91,7 +89,7 @@
       <div class="hint">
         Move: WASD / Arrow Keys / Joystick<br/>
         Guards patrol to the end, <b>pause</b>, then <b>return</b>.<br/>
-        Guards chase only after spotting you; give up after losing line-of-sight.<br/>
+        Guard cones are <b>wall-occluded</b> (raycast fan).<br/>
         <b>Score only comes from collecting gems.</b>
       </div>
     </div>
@@ -160,6 +158,10 @@
     arriveEps: 6,
     stuckSeconds: 0.45,
     stuckMoveEps: 0.25,
+
+    // Occluded cone drawing quality/perf knobs
+    coneRays: 36,
+    rayStep: 6,
   };
 
   const POWERUP_CFG = {
@@ -173,7 +175,7 @@
   const SPRITE = { drawSize: 56 };
   const GEM_DRAW = { size: 28, collectSize: 40, collectTTL: 0.30 };
 
-  // ========= assets (MATCH YOUR SCREENSHOT EXACTLY) =========
+  // ========= assets (MATCH YOUR FILENAMES) =========
   const ASSETS = {
     floor: "assets/floortexture.png",
     wall:  "assets/walltexture.png",
@@ -541,6 +543,48 @@
     return {x:(t.tx+0.5)*TILE, y:(t.ty+0.5)*TILE, tx:t.tx,ty:t.ty};
   }
 
+  // ========= Option A: Occluded cone via ray fan =========
+  function castRayToWall(ax, ay, ang, maxDist) {
+    const step = GUARD_CFG.rayStep;
+    const vx = Math.cos(ang), vy = Math.sin(ang);
+
+    let x = ax, y = ay;
+    for (let d = 0; d < maxDist; d += step) {
+      x = ax + vx * d;
+      y = ay + vy * d;
+      const t = worldToTile(x, y);
+      if (isWallTile(t.tx, t.ty)) {
+        return { x: ax + vx * (d - step), y: ay + vy * (d - step) };
+      }
+    }
+    return { x: ax + vx * maxDist, y: ay + vy * maxDist };
+  }
+
+  function drawOccludedCone(g) {
+    const dir = norm(g.dirX, g.dirY);
+    const center = Math.atan2(dir.y, dir.x);
+
+    const rays = GUARD_CFG.coneRays;
+    const aStart = center - GUARD_CFG.coneHalfAngle;
+    const aEnd   = center + GUARD_CFG.coneHalfAngle;
+
+    ctx.save();
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = (g.state === "CHASE") ? "#ff7b72" : "#79c0ff";
+
+    ctx.beginPath();
+    ctx.moveTo(g.x, g.y);
+    for (let i = 0; i <= rays; i++) {
+      const t = i / rays;
+      const ang = aStart + (aEnd - aStart) * t;
+      const hit = castRayToWall(g.x, g.y, ang, GUARD_CFG.visionRange);
+      ctx.lineTo(hit.x, hit.y);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
   // ========= game state =========
   let player, guards, powerups, floaters, collectBursts, REACH;
   let gameTime, gameOver, win;
@@ -552,7 +596,6 @@
     if(r<0.93) return 20;
     return 50;
   }
-
   function addFloater(x,y,text){ floaters.push({x,y,text,ttl:0.9,vy:-28}); }
 
   // ========= powerups =========
@@ -594,6 +637,7 @@
       searchTimer:0,
       stuckTime:0,
       lastX:x, lastY:y,
+      facingAngle: 0,
     };
   }
 
@@ -639,6 +683,14 @@
 
     ent.dirX = lerp(ent.dirX, vx, clamp(GUARD_CFG.turnSmoothing*dt,0,1));
     ent.dirY = lerp(ent.dirY, vy, clamp(GUARD_CFG.turnSmoothing*dt,0,1));
+
+    // Track facing angle for sprite rotation (smoothed)
+    const targetAng = Math.atan2(ent.dirY, ent.dirX);
+    // shortest-angle interpolation:
+    let da = targetAng - ent.facingAngle;
+    da = Math.atan2(Math.sin(da), Math.cos(da));
+    ent.facingAngle += da * clamp(12*dt, 0, 1);
+
     return d < GUARD_CFG.arriveEps;
   }
 
@@ -657,9 +709,15 @@
   function updateGuardPatrol(g, dt){
     if(g.state==="PAUSE_END" || g.state==="PAUSE_START"){
       g.pauseTimer -= dt;
+      // slight idle wobble
       const t=performance.now()*0.001;
-      g.dirX=Math.cos(t*1.2);
-      g.dirY=Math.sin(t*1.2);
+      g.dirX = lerp(g.dirX, Math.cos(t*1.2), clamp(2.5*dt,0,1));
+      g.dirY = lerp(g.dirY, Math.sin(t*1.2), clamp(2.5*dt,0,1));
+      const targetAng = Math.atan2(g.dirY, g.dirX);
+      let da = targetAng - g.facingAngle;
+      da = Math.atan2(Math.sin(da), Math.cos(da));
+      g.facingAngle += da * clamp(8*dt, 0, 1);
+
       guardUnstuck(g, dt, false);
       if(g.pauseTimer<=0) g.state="PATROL";
       return;
@@ -693,8 +751,13 @@
       if(atLast){
         g.searchTimer -= dt;
         const t=performance.now()*0.001;
-        g.dirX=Math.cos(t*1.8);
-        g.dirY=Math.sin(t*1.8);
+        g.dirX = lerp(g.dirX, Math.cos(t*1.8), clamp(2.0*dt,0,1));
+        g.dirY = lerp(g.dirY, Math.sin(t*1.8), clamp(2.0*dt,0,1));
+        const targetAng = Math.atan2(g.dirY, g.dirX);
+        let da = targetAng - g.facingAngle;
+        da = Math.atan2(Math.sin(da), Math.cos(da));
+        g.facingAngle += da * clamp(10*dt, 0, 1);
+
         if(g.searchTimer<=0) g.state="PATROL";
       }
     } else updateGuardPatrol(g, dt);
@@ -840,6 +903,17 @@
     ctx.drawImage(img, x-size/2, y-size/2, size, size);
   }
 
+  // Rotate guard.png to face g.facingAngle
+  // Assumption: guard.png is drawn facing RIGHT (east). If yours faces UP, adjust by -Math.PI/2.
+  function drawRotatedSprite(img, x, y, size, angleRad) {
+    if (!img) return;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angleRad);
+    ctx.drawImage(img, -size/2, -size/2, size, size);
+    ctx.restore();
+  }
+
   function drawTitleScreen(){
     ctx.fillStyle="#000";
     ctx.fillRect(0,0,WORLD_W,WORLD_H);
@@ -911,21 +985,14 @@
   }
 
   function drawGuard(g){
-    // cone
-    ctx.save();
-    ctx.globalAlpha=0.22;
-    ctx.fillStyle=(g.state==="CHASE") ? "#ff7b72" : "#79c0ff";
-    const dir=norm(g.dirX,g.dirY);
-    const a0=Math.atan2(dir.y,dir.x);
-    ctx.beginPath();
-    ctx.moveTo(g.x,g.y);
-    ctx.arc(g.x,g.y, GUARD_CFG.visionRange, a0-GUARD_CFG.coneHalfAngle, a0+GUARD_CFG.coneHalfAngle);
-    ctx.closePath();
-    ctx.fill();
-    ctx.restore();
+    // Wall-occluded vision cone (Option A)
+    drawOccludedCone(g);
 
-    if(guardSprite) drawSpriteCentered(guardSprite,g.x,g.y,SPRITE.drawSize);
-    else {
+    // Guard sprite: rotate to facing direction
+    if(guardSprite){
+      drawRotatedSprite(guardSprite, g.x, g.y, SPRITE.drawSize, g.facingAngle);
+    } else {
+      // fallback circle
       ctx.beginPath();
       ctx.fillStyle=(g.state==="CHASE") ? "#ff7b72" : "#c9d1d9";
       ctx.arc(g.x,g.y,g.radius,0,Math.PI*2);
@@ -1113,13 +1180,11 @@
     ];
 
     try {
-      // Load required sequentially so console shows exactly what breaks
       for(const src of required){
         await loadImage(src);
         console.log("✅ loaded", src);
       }
 
-      // Store images
       floorImg = await loadImage(ASSETS.floor);
       wallImg  = await loadImage(ASSETS.wall);
       titleImg = await loadImage(ASSETS.title);
@@ -1137,7 +1202,6 @@
       gemCollectSprites[20] = await loadImage(GEM_FILES[20].collect);
       gemCollectSprites[50] = await loadImage(GEM_FILES[50].collect);
 
-      // Optional guard
       guardSprite = await loadImage(ASSETS.guard).catch(() => null);
 
       UI.loading.style.display="none";
