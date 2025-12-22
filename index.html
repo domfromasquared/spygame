@@ -108,14 +108,8 @@
   // Utilities
   // =============================
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-  const dist2 = (ax, ay, bx, by) => {
-    const dx = bx - ax, dy = by - ay;
-    return dx*dx + dy*dy;
-  };
-  const norm = (x, y) => {
-    const l = Math.hypot(x, y) || 1;
-    return { x: x / l, y: y / l };
-  };
+  const dist2 = (ax, ay, bx, by) => { const dx = bx - ax, dy = by - ay; return dx*dx + dy*dy; };
+  const norm = (x, y) => { const l = Math.hypot(x, y) || 1; return { x: x / l, y: y / l }; };
   const dot = (ax, ay, bx, by) => ax*bx + ay*by;
   const lerp = (a, b, t) => a + (b - a) * t;
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
@@ -135,7 +129,7 @@
   // =============================
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d");
-  ctx.imageSmoothingEnabled = true; // better for high-detail sprites
+  ctx.imageSmoothingEnabled = true;
 
   const UI = {
     loading: document.getElementById("loading"),
@@ -150,7 +144,6 @@
     joy: document.getElementById("joy"),
     joyKnob: document.getElementById("joyKnob"),
   };
-
   if (!isMobile) UI.joyWrap.style.display = "none";
 
   // =============================
@@ -159,23 +152,17 @@
   const TILE = 32;
   const MAP_W = 26;
   const MAP_H = 18;
-
   const DESKTOP_W = MAP_W * TILE; // 832
   const DESKTOP_H = MAP_H * TILE; // 576
 
   const GAME_CFG = { targetScore: 150, timeLimit: 75, maxHP: 100 };
 
-  // collision stays small; visuals can be larger
-  const PLAYER_CFG = {
-    radius: 12,
-    speed: 175,
-    damageGrace: 0.10,
-  };
+  const PLAYER_CFG = { radius: 12, speed: 175, damageGrace: 0.10 };
 
   const GUARD_CFG = {
     radius: 12,
     patrolSpeed: 95,
-    chaseSpeed: 160,         // slightly slower than spy
+    chaseSpeed: 160,     // slightly slower than spy
     visionRange: 220,
     coneHalfAngle: Math.PI / 7,
     dps: 26,
@@ -197,12 +184,10 @@
     minSpawnDistFromPlayer: 2.5 * TILE,
   };
 
-  // Sprite sizing
-  const SPRITE = {
-    drawSize: 56, // spy/guard draw size (source can be 128x128)
-  };
+  // spy/guard draw size (source can be 128x128; draw smaller)
+  const SPRITE = { drawSize: 56 };
 
-  // Gem draw sizing (your gems are 32x32 sources)
+  // gems are 32x32 sources; draw slightly smaller for spacing
   const GEM_DRAW = {
     size: 28,
     collectSize: 40,
@@ -210,12 +195,12 @@
   };
 
   // =============================
-  // Assets (paths expected in /assets)
+  // Assets (UPDATED to match your folder screenshot)
   // =============================
   const ASSETS = {
     floor: "assets/floortexture.png",
     wall:  "assets/walltexture.png",
-    guard: "assets/guard.png", // optional; will fallback to circles if missing
+    guard: "assets/guard.png", // optional; safe if missing
   };
 
   const SPY_FILES = {
@@ -229,11 +214,11 @@
     nw: "assets/spynw.png",
   };
 
+  // Each gem has its own collect sprite now
   const GEM_FILES = {
-    10: "assets/gem10.png",
-    20: "assets/gem20.png",
-    50: "assets/gem50.png",
-    collect: "assets/gemcollect.png",
+    10: { gem: "assets/gem10.png", collect: "assets/gem10collect.png" },
+    20: { gem: "assets/gem20.png", collect: "assets/gem20collect.png" },
+    50: { gem: "assets/gem50.png", collect: "assets/gem50collect.png" },
   };
 
   function loadImage(src) {
@@ -249,13 +234,13 @@
   let floorImg, wallImg;
   let floorPattern = null;
 
-  const spySprites = {};      // key -> Image
+  const spySprites = {};          // key -> Image
   let guardSprite = null;
 
-  const gemSprites = {};      // {10: Image, 20: Image, 50: Image}
-  let gemCollectSprite = null;
+  const gemSprites = {};          // {10: Image, 20: Image, 50: Image}
+  const gemCollectSprites = {};   // {10: Image, 20: Image, 50: Image}
 
-  // collect animation instances
+  // collect animation instances: {x,y,ttl,points}
   let collectBursts = [];
 
   // =============================
@@ -287,7 +272,6 @@
     canvas.width = Math.floor(w * dpr);
     canvas.height = Math.floor(h * dpr);
   }
-
   window.addEventListener("resize", () => sizeCanvasForDevice());
 
   // =============================
@@ -376,7 +360,7 @@
   function dirKeyFromVector(vx, vy, fallbackKey="s") {
     const mag = Math.hypot(vx, vy);
     if (mag < 0.02) return fallbackKey;
-    const a = Math.atan2(vy, vx); // 0 = east
+    const a = Math.atan2(vy, vx);
     const oct = Math.round(8 * a / (2 * Math.PI) + 8) % 8;
     const keys = ["e","ne","n","nw","w","sw","s","se"];
     return keys[oct];
@@ -448,9 +432,7 @@
     ],
   ];
 
-  function parseTemplate(rows) {
-    return rows.map(r => r.split("").map(c => (c === "1" ? 1 : 0)));
-  }
+  function parseTemplate(rows) { return rows.map(r => r.split("").map(c => (c === "1" ? 1 : 0))); }
   function flipHorizontal(m) {
     const out = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(1));
     for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) out[y][MAP_W - 1 - x] = m[y][x];
@@ -468,16 +450,16 @@
     if (floorCount === 0) return false;
 
     let sx = -1, sy = -1;
-    for (let y = 1; y < MAP_H-1 && sy === -1; y++) {
-      for (let x = 1; x < MAP_W-1; x++) if (m[y][x] === 0) { sx = x; sy = y; break; }
-    }
+    for (let y = 1; y < MAP_H-1 && sy === -1; y++)
+      for (let x = 1; x < MAP_W-1; x++)
+        if (m[y][x] === 0) { sx = x; sy = y; break; }
 
     const q = [{x:sx,y:sy}];
     const vis = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(false));
     vis[sy][sx] = true;
     let reached = 1;
-
     const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+
     while (q.length) {
       const p = q.shift();
       for (const d of dirs) {
@@ -517,18 +499,14 @@
     if (Math.random() < 0.5) m = flipHorizontal(m);
     if (Math.random() < 0.25) m = flipVertical(m);
     if (Math.random() < 0.9) m = applyGateVariations(m);
-    if (!isFullyConnected(m)) {
-      m = parseTemplate(pick(MAP_TEMPLATES));
-      if (Math.random() < 0.5) m = flipHorizontal(m);
-      if (Math.random() < 0.25) m = flipVertical(m);
-    }
+    if (!isFullyConnected(m)) m = parseTemplate(pick(MAP_TEMPLATES));
     return m;
   }
 
   // =============================
   // Map / Collision / LOS
   // =============================
-  let map = null; // 1 wall, 0 floor
+  let map = null;
 
   const isWallTile = (tx, ty) => {
     if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) return true;
@@ -543,25 +521,22 @@
     const minTy = Math.floor((ent.y - r) / TILE);
     const maxTy = Math.floor((ent.y + r) / TILE);
 
-    for (let ty = minTy; ty <= maxTy; ty++) {
-      for (let tx = minTx; tx <= maxTx; tx++) {
-        if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) continue;
-        if (map[ty][tx] !== 1) continue;
+    for (let ty = minTy; ty <= maxTy; ty++) for (let tx = minTx; tx <= maxTx; tx++) {
+      if (tx < 0 || ty < 0 || tx >= MAP_W || ty >= MAP_H) continue;
+      if (map[ty][tx] !== 1) continue;
 
-        const left = tx * TILE, top = ty * TILE;
-        const right = left + TILE, bottom = top + TILE;
+      const left = tx * TILE, top = ty * TILE;
+      const right = left + TILE, bottom = top + TILE;
+      const cx = clamp(ent.x, left, right);
+      const cy = clamp(ent.y, top, bottom);
 
-        const cx = clamp(ent.x, left, right);
-        const cy = clamp(ent.y, top, bottom);
-
-        const dx = ent.x - cx, dy = ent.y - cy;
-        const d2 = dx*dx + dy*dy;
-        if (d2 < r*r) {
-          const d = Math.sqrt(d2) || 0.0001;
-          const push = (r - d);
-          ent.x += (dx / d) * push;
-          ent.y += (dy / d) * push;
-        }
+      const dx = ent.x - cx, dy = ent.y - cy;
+      const d2 = dx*dx + dy*dy;
+      if (d2 < r*r) {
+        const d = Math.sqrt(d2) || 0.0001;
+        const push = (r - d);
+        ent.x += (dx / d) * push;
+        ent.y += (dy / d) * push;
       }
     }
   }
@@ -597,8 +572,8 @@
 
     const q = [{ tx: start.tx, ty: start.ty }];
     reachable[start.ty][start.tx] = true;
-
     const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+
     while (q.length) {
       const { tx, ty } = q.shift();
       for (const d of dirs) {
@@ -793,15 +768,12 @@
       g.lastSeenX = player.x; g.lastSeenY = player.y;
       g.timeSinceSeen = 0;
       if (g.state !== "CHASE") g.state = "CHASE";
-    } else {
-      g.timeSinceSeen += dt;
-    }
+    } else g.timeSinceSeen += dt;
 
     if (g.state === "CHASE") {
       moveTowards(g, g.lastSeenX, g.lastSeenY, GUARD_CFG.chaseSpeed, dt);
       resolveCircleVsMap(g);
       guardUnstuck(g, dt, true);
-
       if (g.timeSinceSeen > GUARD_CFG.loseSightGrace) {
         g.state = "SEARCH";
         g.searchTimer = GUARD_CFG.searchDuration;
@@ -810,7 +782,6 @@
       const atLast = moveTowards(g, g.lastSeenX, g.lastSeenY, GUARD_CFG.patrolSpeed, dt);
       resolveCircleVsMap(g);
       guardUnstuck(g, dt, true);
-
       if (atLast) {
         g.searchTimer -= dt;
         const t = performance.now() * 0.001;
@@ -818,9 +789,7 @@
         g.dirY = Math.sin(t * 1.8);
         if (g.searchTimer <= 0) g.state = "PATROL";
       }
-    } else {
-      updateGuardPatrol(g, dt);
-    }
+    } else updateGuardPatrol(g, dt);
   }
 
   // Patrol route builder (corridor-following)
@@ -869,7 +838,6 @@
       const p = path[i];
       waypoints.push({ x:(p.tx+0.5)*TILE, y:(p.ty+0.5)*TILE });
     }
-
     const last = path[path.length-1];
     const lastWp = { x:(last.tx+0.5)*TILE, y:(last.ty+0.5)*TILE };
     const tail = waypoints[waypoints.length-1];
@@ -891,7 +859,6 @@
     player.y += mv.y * player.speed * dt;
     resolveCircleVsMap(player);
 
-    // 8-way facing for directional spy sprites
     const key = dirKeyFromVector(mv.x, mv.y, player.facing || "s");
     player.facing = key;
   }
@@ -911,8 +878,8 @@
       if (dist2(p.x,p.y, player.x,player.y) <= POWERUP_CFG.pickupRadius**2) {
         player.score += p.points;
 
-        // collect burst animation
-        collectBursts.push({ x: p.x, y: p.y, ttl: GEM_DRAW.collectTTL });
+        // burst now stores which points type so it can pick the right collect sprite
+        collectBursts.push({ x: p.x, y: p.y, ttl: GEM_DRAW.collectTTL, points: p.points });
 
         addFloater(p.x, p.y - 10, `+${p.points}`);
         UI.hud.classList.add("flash");
@@ -950,9 +917,8 @@
         canvas.classList.add("flash");
         setTimeout(() => canvas.classList.remove("flash"), 90);
       }
-    } else {
-      player.coneContact = 0;
-    }
+    } else player.coneContact = 0;
+
     player.hp = clamp(player.hp, 0, GAME_CFG.maxHP);
   }
 
@@ -966,10 +932,7 @@
   // Rendering (scaled world on mobile)
   // =============================
   function beginWorldRender() {
-    if (!isMobile) {
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      return;
-    }
+    if (!isMobile) { ctx.setTransform(1, 0, 0, 1, 0, 0); return; }
     const sx = canvas.width / DESKTOP_W;
     const sy = canvas.height / DESKTOP_H;
     ctx.setTransform(sx, 0, 0, sy, 0, 0);
@@ -983,11 +946,8 @@
       ctx.fillStyle = "#000";
       ctx.fillRect(0, 0, DESKTOP_W, DESKTOP_H);
     }
-    for (let y = 0; y < MAP_H; y++) {
-      for (let x = 0; x < MAP_W; x++) {
-        if (map[y][x] === 1) ctx.drawImage(wallImg, x*TILE, y*TILE, TILE, TILE);
-      }
-    }
+    for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++)
+      if (map[y][x] === 1) ctx.drawImage(wallImg, x*TILE, y*TILE, TILE, TILE);
   }
 
   function drawSpriteCentered(img, x, y, size) {
@@ -998,52 +958,46 @@
   function drawPowerups() {
     for (const p of powerups) {
       const img = gemSprites[p.points];
-
       const lifeRatio = clamp(p.ttl / POWERUP_CFG.ttl, 0, 1);
       const pulse = 0.85 + 0.15 * Math.sin((POWERUP_CFG.ttl - p.ttl) * 7);
 
       ctx.save();
       ctx.globalAlpha = pulse;
-
-      if (img) {
-        drawSpriteCentered(img, p.x, p.y, GEM_DRAW.size);
-      } else {
-        // fallback
+      if (img) drawSpriteCentered(img, p.x, p.y, GEM_DRAW.size);
+      else {
         ctx.beginPath();
         ctx.fillStyle = "#a5d6ff";
         ctx.arc(p.x, p.y, 9, 0, Math.PI * 2);
         ctx.fill();
       }
 
-      // countdown ring
       ctx.globalAlpha = 0.45;
       ctx.strokeStyle = "#e6edf3";
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.arc(p.x, p.y, 16, -Math.PI/2, -Math.PI/2 + lifeRatio * Math.PI * 2);
       ctx.stroke();
-
       ctx.restore();
     }
   }
 
   function drawCollectBursts() {
-    if (!gemCollectSprite) return;
-
     for (const b of collectBursts) {
+      const img = gemCollectSprites[b.points];
+      if (!img) continue;
+
       const t = 1 - (b.ttl / GEM_DRAW.collectTTL);
       const size = lerp(GEM_DRAW.collectSize * 0.7, GEM_DRAW.collectSize * 1.15, t);
       const alpha = 1 - t;
 
       ctx.save();
       ctx.globalAlpha = alpha;
-      drawSpriteCentered(gemCollectSprite, b.x, b.y, size);
+      drawSpriteCentered(img, b.x, b.y, size);
       ctx.restore();
     }
   }
 
   function drawGuard(g) {
-    // Vision cone
     ctx.save();
     ctx.globalAlpha = 0.22;
     ctx.fillStyle = (g.state === "CHASE") ? "#ff7b72" : "#79c0ff";
@@ -1092,7 +1046,6 @@
 
   function drawOverlay() {
     if (!gameOver) return;
-
     ctx.save();
     ctx.globalAlpha = 0.78;
     ctx.fillStyle = "#000";
@@ -1106,14 +1059,12 @@
     ctx.fillText(win ? "MISSION COMPLETE" : "MISSION FAILED", DESKTOP_W/2, DESKTOP_H/2 - 14);
 
     ctx.font = "16px system-ui";
-    const msg = win
-      ? "You hit the target score. Nice work."
+    const msg = win ? "You hit the target score. Nice work."
       : (player.hp <= 0 ? "You took too much damage." : "You ran out of time.");
     ctx.fillText(msg, DESKTOP_W/2, DESKTOP_H/2 + 18);
 
     ctx.font = "14px system-ui";
     ctx.fillText("Press Restart to generate another Pac-style map.", DESKTOP_W/2, DESKTOP_H/2 + 42);
-
     ctx.restore();
   }
 
@@ -1150,8 +1101,7 @@
 
     const pSpawn = findSafeFloorSpawn(PLAYER_CFG.radius, { tx: 2, ty: 2 });
     player = {
-      x: pSpawn.x,
-      y: pSpawn.y,
+      x: pSpawn.x, y: pSpawn.y,
       radius: PLAYER_CFG.radius,
       speed: PLAYER_CFG.speed,
       hp: GAME_CFG.maxHP,
@@ -1210,7 +1160,6 @@
 
     resetJoystick();
   }
-
   UI.restart.addEventListener("click", restart);
 
   // =============================
@@ -1241,35 +1190,35 @@
   }
 
   // =============================
-  // Boot (load textures + spy directional sprites + gems)
+  // Boot (load textures + spy directional sprites + gems + per-gem collect)
   // =============================
   async function boot() {
     sizeCanvasForDevice();
 
     try {
-      // core textures
       [floorImg, wallImg] = await Promise.all([
         loadImage(ASSETS.floor),
         loadImage(ASSETS.wall),
       ]);
-
       floorPattern = ctx.createPattern(floorImg, "repeat");
 
-      // spy directional sprites
       const spyKeys = Object.keys(SPY_FILES);
       await Promise.all(spyKeys.map(k =>
         loadImage(SPY_FILES[k]).then(img => spySprites[k] = img)
       ));
 
-      // guard sprite is optional
+      // guard sprite optional
       guardSprite = await loadImage(ASSETS.guard).catch(() => null);
 
-      // gem sprites
+      // gem sprites + unique collect sprites
       await Promise.all([
-        loadImage(GEM_FILES[10]).then(img => gemSprites[10] = img),
-        loadImage(GEM_FILES[20]).then(img => gemSprites[20] = img),
-        loadImage(GEM_FILES[50]).then(img => gemSprites[50] = img),
-        loadImage(GEM_FILES.collect).then(img => gemCollectSprite = img),
+        loadImage(GEM_FILES[10].gem).then(img => gemSprites[10] = img),
+        loadImage(GEM_FILES[20].gem).then(img => gemSprites[20] = img),
+        loadImage(GEM_FILES[50].gem).then(img => gemSprites[50] = img),
+
+        loadImage(GEM_FILES[10].collect).then(img => gemCollectSprites[10] = img),
+        loadImage(GEM_FILES[20].collect).then(img => gemCollectSprites[20] = img),
+        loadImage(GEM_FILES[50].collect).then(img => gemCollectSprites[50] = img),
       ]);
 
       UI.loading.style.display = "none";
@@ -1280,7 +1229,8 @@
         "Could not load images. Confirm these exist in /assets:\n" +
         "floortexture.png, walltexture.png\n" +
         "spyn.png, spyne.png, spye.png, spyse.png, spys.png, spysw.png, spyw.png, spynw.png\n" +
-        "gem10.png, gem20.png, gem50.png, gemcollect.png\n" +
+        "gem10.png, gem20.png, gem50.png\n" +
+        "gem10collect.png, gem20collect.png, gem50collect.png\n" +
         "(optional) guard.png\n\n" +
         "Tip: run via GitHub Pages / local server, not file://";
       console.error(err);
