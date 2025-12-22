@@ -45,6 +45,9 @@
       background: rgba(0,0,0,0.6);
       color: #e6edf3; font-weight: 700;
       letter-spacing: 0.02em;
+      white-space: pre-line;
+      padding: 24px;
+      text-align: center;
     }
   </style>
 </head>
@@ -109,9 +112,7 @@
   // =============================
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d");
-
-  // For crisp pixel textures (optional; if you want smooth textures, set true)
-  ctx.imageSmoothingEnabled = false;
+  ctx.imageSmoothingEnabled = false; // crisp textures (set true if you prefer smooth)
 
   const UI = {
     loading: document.getElementById("loading"),
@@ -134,21 +135,35 @@
   const MAP_H = 18;
 
   const GAME_CFG = { targetScore: 150, timeLimit: 75, maxHP: 100 };
-  const PLAYER_CFG = { radius: 12, speed: 175, damageGrace: 0.10 };
+
+  const PLAYER_CFG = {
+    radius: 12,         // spy collision radius (24x24 effective)
+    speed: 175,         // spy speed
+    damageGrace: 0.10,
+  };
 
   const GUARD_CFG = {
     radius: 12,
     patrolSpeed: 95,
-    chaseSpeed: 140,
+
+    // IMPORTANT: slightly slower than spy when chasing
+    chaseSpeed: 160,     // < PLAYER_CFG.speed (175)
+
     visionRange: 220,
     coneHalfAngle: Math.PI / 7,
     dps: 26,
     loseSightGrace: 1.2,
     searchDuration: 2.0,
     turnSmoothing: 10,
+
+    // Patrol: end pause -> reverse -> start pause
     endPause: 1.1,
     startPause: 0.6,
     arriveEps: 6,
+
+    // Unstuck behavior
+    stuckSeconds: 0.45,  // how long before we consider it stuck
+    stuckMoveEps: 0.25,  // movement threshold per frame
   };
 
   const POWERUP_CFG = {
@@ -161,7 +176,7 @@
 
   // =============================
   // Assets (your files)
-  // Put these in: ./assets/floortexture.png and ./assets/walltexture.png
+  // Place in: ./assets/floortexture.png and ./assets/walltexture.png
   // =============================
   const ASSETS = {
     floor: "assets/floortexture.png",
@@ -261,7 +276,7 @@
   }
 
   // =============================
-  // Pac-Man style map templates (1 wall, 0 floor)
+  // Pac-style map templates (1 wall, 0 floor)
   // =============================
   const MAP_TEMPLATES = [
     [
@@ -327,15 +342,12 @@
   ];
 
   function parseTemplate(rows) {
-    const m = rows.map(r => r.split("").map(c => (c === "1" ? 1 : 0)));
-    return m;
+    return rows.map(r => r.split("").map(c => (c === "1" ? 1 : 0)));
   }
 
   function flipHorizontal(m) {
     const out = Array.from({ length: MAP_H }, () => Array(MAP_W).fill(1));
-    for (let y = 0; y < MAP_H; y++) {
-      for (let x = 0; x < MAP_W; x++) out[y][MAP_W - 1 - x] = m[y][x];
-    }
+    for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++) out[y][MAP_W - 1 - x] = m[y][x];
     return out;
   }
 
@@ -500,9 +512,9 @@
     }
 
     const tiles = [];
-    for (let y = 0; y < MAP_H; y++) {
-      for (let x = 0; x < MAP_W; x++) if (map[y][x] === 0 && reachable[y][x]) tiles.push({ tx: x, ty: y });
-    }
+    for (let y = 0; y < MAP_H; y++) for (let x = 0; x < MAP_W; x++)
+      if (map[y][x] === 0 && reachable[y][x]) tiles.push({ tx: x, ty: y });
+
     return { reachable, tiles };
   }
 
@@ -543,7 +555,7 @@
   }
 
   // =============================
-  // Powerups
+  // Powerups (points only)
   // =============================
   function randomReachablePosition() {
     for (let i = 0; i < 180; i++) {
@@ -572,7 +584,8 @@
   }
 
   // =============================
-  // Guard AI
+  // Guard AI (PATROL -> CHASE -> SEARCH -> PATROL)
+  // + Unstuck logic
   // =============================
   function makeGuard(x, y, waypoints) {
     return {
@@ -588,7 +601,35 @@
       lastSeenX: x, lastSeenY: y,
       timeSinceSeen: 999,
       searchTimer: 0,
+
+      // Unstuck tracking
+      stuckTime: 0,
+      lastX: x,
+      lastY: y,
     };
+  }
+
+  function guardUnstuck(g, dt, isTryingToMove) {
+    const moved = Math.hypot(g.x - g.lastX, g.y - g.lastY);
+    g.lastX = g.x;
+    g.lastY = g.y;
+
+    if (isTryingToMove && moved < GUARD_CFG.stuckMoveEps) g.stuckTime += dt;
+    else g.stuckTime = 0;
+
+    if (g.stuckTime > GUARD_CFG.stuckSeconds) {
+      g.stuckTime = 0;
+
+      if (g.state === "PATROL") {
+        // Skip to next waypoint so patrol continues smoothly
+        stepPatrolIndex(g);
+      } else {
+        // In chase/search, randomize direction a bit to help slide off corners
+        const t = performance.now() * 0.001;
+        g.dirX = Math.cos(t * 3.0);
+        g.dirY = Math.sin(t * 3.0);
+      }
+    }
   }
 
   function canGuardSeePlayer(g) {
@@ -642,6 +683,7 @@
       const t = performance.now() * 0.001;
       g.dirX = Math.cos(t * 1.2);
       g.dirY = Math.sin(t * 1.2);
+      guardUnstuck(g, dt, false);
       if (g.pauseTimer <= 0) g.state = "PATROL";
       return;
     }
@@ -649,6 +691,8 @@
     const wp = g.waypoints[g.wpIndex];
     const reached = moveTowards(g, wp.x, wp.y, GUARD_CFG.patrolSpeed, dt);
     resolveCircleVsMap(g);
+    guardUnstuck(g, dt, true);
+
     if (reached) stepPatrolIndex(g);
   }
 
@@ -665,6 +709,8 @@
     if (g.state === "CHASE") {
       moveTowards(g, g.lastSeenX, g.lastSeenY, GUARD_CFG.chaseSpeed, dt);
       resolveCircleVsMap(g);
+      guardUnstuck(g, dt, true);
+
       if (g.timeSinceSeen > GUARD_CFG.loseSightGrace) {
         g.state = "SEARCH";
         g.searchTimer = GUARD_CFG.searchDuration;
@@ -672,6 +718,8 @@
     } else if (g.state === "SEARCH") {
       const atLast = moveTowards(g, g.lastSeenX, g.lastSeenY, GUARD_CFG.patrolSpeed, dt);
       resolveCircleVsMap(g);
+      guardUnstuck(g, dt, true);
+
       if (atLast) {
         g.searchTimer -= dt;
         const t = performance.now() * 0.001;
@@ -684,7 +732,7 @@
     }
   }
 
-  // Patrol route that sticks to corridors (orthogonal)
+  // Patrol route builder (corridor-following)
   function neighborsFloor(tx, ty) {
     const dirs = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
     const res = [];
@@ -696,7 +744,7 @@
     return res;
   }
 
-  function makeGridPatrolRoute(startTx, startTy, steps = 80) {
+  function makeGridPatrolRoute(startTx, startTy, steps = 85) {
     let tx = startTx, ty = startTy;
     const path = [{ tx, ty }];
     const visited = new Set([`${tx},${ty}`]);
@@ -809,11 +857,9 @@
 
   // =============================
   // Rendering (TEXTURES)
-  // - Floors: use a repeating pattern for speed
-  // - Walls: draw wall texture per wall tile
   // =============================
   function drawMapTextured() {
-    // 1) Background floor (pattern fill)
+    // floor
     if (floorPattern) {
       ctx.fillStyle = floorPattern;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -822,12 +868,10 @@
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
 
-    // 2) Wall tiles
+    // walls
     for (let y = 0; y < MAP_H; y++) {
       for (let x = 0; x < MAP_W; x++) {
-        if (map[y][x] === 1) {
-          ctx.drawImage(wallImg, x*TILE, y*TILE, TILE, TILE);
-        }
+        if (map[y][x] === 1) ctx.drawImage(wallImg, x*TILE, y*TILE, TILE, TILE);
       }
     }
   }
@@ -846,11 +890,13 @@
     ctx.fill();
     ctx.restore();
 
+    // Body
     ctx.beginPath();
     ctx.fillStyle = (g.state === "CHASE") ? "#ff7b72" : "#c9d1d9";
     ctx.arc(g.x, g.y, g.radius, 0, Math.PI*2);
     ctx.fill();
 
+    // Facing dot
     const f = norm(g.dirX, g.dirY);
     ctx.beginPath();
     ctx.fillStyle = "#0b0f14";
@@ -943,7 +989,7 @@
     ctx.fillText(msg, canvas.width/2, canvas.height/2 + 18);
 
     ctx.font = "14px system-ui";
-    ctx.fillText("Press Restart to generate another Pac-style maze.", canvas.width/2, canvas.height/2 + 42);
+    ctx.fillText("Press Restart to generate another Pac-style map.", canvas.width/2, canvas.height/2 + 42);
 
     ctx.restore();
   }
@@ -1077,7 +1123,6 @@
         loadImage(ASSETS.wall),
       ]);
 
-      // Create a repeating floor pattern (fast)
       floorPattern = ctx.createPattern(floorImg, "repeat");
 
       UI.loading.style.display = "none";
@@ -1086,7 +1131,8 @@
     } catch (err) {
       UI.loading.textContent =
         "Could not load textures. Check paths:\n" +
-        "assets/floortexture.png\nassets/walltexture.png";
+        "assets/floortexture.png\nassets/walltexture.png\n\n" +
+        "Also confirm your page is served (not opened as a raw file) if the browser blocks loading.";
       console.error(err);
     }
   }
