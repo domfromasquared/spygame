@@ -158,8 +158,6 @@
     arriveEps: 6,
     stuckSeconds: 0.45,
     stuckMoveEps: 0.25,
-
-    // Occluded cone drawing quality/perf knobs
     coneRays: 36,
     rayStep: 6,
   };
@@ -175,7 +173,7 @@
   const SPRITE = { drawSize: 56 };
   const GEM_DRAW = { size: 28, collectSize: 40, collectTTL: 0.30 };
 
-  // ========= assets (MATCH YOUR FILENAMES) =========
+  // ========= assets =========
   const ASSETS = {
     floor: "assets/floortexture.png",
     wall:  "assets/walltexture.png",
@@ -183,16 +181,18 @@
     guard: "assets/guard.png", // optional
   };
 
-  // Your N/S were backward, so map them swapped:
+  // FIXED: diagonals were backwards (plus your N/S are swapped in art)
   const SPY_FILES = {
     n:  "assets/spys.png",
-    ne: "assets/spyne.png",
     e:  "assets/spye.png",
-    se: "assets/spyse.png",
     s:  "assets/spyn.png",
-    sw: "assets/spysw.png",
     w:  "assets/spyw.png",
-    nw: "assets/spynw.png",
+
+    // diagonals corrected:
+    ne: "assets/spysw.png",
+    nw: "assets/spyse.png",
+    se: "assets/spynw.png",
+    sw: "assets/spyne.png",
   };
 
   const GEM_FILES = {
@@ -411,7 +411,7 @@
     const q=[{x:sx,y:sy}];
     const vis=Array.from({length:MAP_H},()=>Array(MAP_W).fill(false));
     vis[sy][sx]=true; let reached=1;
-    const dirs=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+    const dirs=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:0-1}];
 
     while(q.length){
       const p=q.shift();
@@ -548,10 +548,9 @@
     const step = GUARD_CFG.rayStep;
     const vx = Math.cos(ang), vy = Math.sin(ang);
 
-    let x = ax, y = ay;
     for (let d = 0; d < maxDist; d += step) {
-      x = ax + vx * d;
-      y = ay + vy * d;
+      const x = ax + vx * d;
+      const y = ay + vy * d;
       const t = worldToTile(x, y);
       if (isWallTile(t.tx, t.ty)) {
         return { x: ax + vx * (d - step), y: ay + vy * (d - step) };
@@ -585,11 +584,34 @@
     ctx.restore();
   }
 
-  // ========= game state =========
-  let player, guards, powerups, floaters, collectBursts, REACH;
-  let gameTime, gameOver, win;
-  let powerupSpawnTimer=0;
+  // ========= gameplay state vars =========
+  let floorImg, wallImg, titleImg, guardSprite;
+  let floorPattern=null;
+  const spySprites={}, gemSprites={}, gemCollectSprites={};
 
+  function beginWorldRender(){
+    if(!isMobile){ ctx.setTransform(1,0,0,1,0,0); return; }
+    const sx=canvas.width/WORLD_W, sy=canvas.height/WORLD_H;
+    ctx.setTransform(sx,0,0,sy,0,0);
+  }
+
+  function drawSpriteCentered(img,x,y,size){
+    if(!img) return;
+    ctx.drawImage(img, x-size/2, y-size/2, size, size);
+  }
+
+  // Assumption: guard.png faces RIGHT by default. If it faces UP, set GUARD_SPRITE_OFFSET = -Math.PI/2
+  const GUARD_SPRITE_OFFSET = 0;
+
+  function drawRotatedSprite(img, x, y, size, angleRad) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angleRad + GUARD_SPRITE_OFFSET);
+    ctx.drawImage(img, -size/2, -size/2, size, size);
+    ctx.restore();
+  }
+
+  // ========= powerups / guards / player =========
   function randomPointsValue(){
     const r=Math.random();
     if(r<0.70) return 10;
@@ -598,7 +620,6 @@
   }
   function addFloater(x,y,text){ floaters.push({x,y,text,ttl:0.9,vy:-28}); }
 
-  // ========= powerups =========
   function randomReachablePosition(){
     for(let i=0;i<180;i++){
       const t=pick(REACH.tiles);
@@ -622,7 +643,6 @@
     powerups.push({x:pos.x,y:pos.y,ttl:POWERUP_CFG.ttl,points:randomPointsValue()});
   }
 
-  // ========= guards =========
   function makeGuard(x,y,waypoints){
     return {
       x,y,radius:GUARD_CFG.radius,
@@ -684,9 +704,7 @@
     ent.dirX = lerp(ent.dirX, vx, clamp(GUARD_CFG.turnSmoothing*dt,0,1));
     ent.dirY = lerp(ent.dirY, vy, clamp(GUARD_CFG.turnSmoothing*dt,0,1));
 
-    // Track facing angle for sprite rotation (smoothed)
     const targetAng = Math.atan2(ent.dirY, ent.dirX);
-    // shortest-angle interpolation:
     let da = targetAng - ent.facingAngle;
     da = Math.atan2(Math.sin(da), Math.cos(da));
     ent.facingAngle += da * clamp(12*dt, 0, 1);
@@ -709,10 +727,10 @@
   function updateGuardPatrol(g, dt){
     if(g.state==="PAUSE_END" || g.state==="PAUSE_START"){
       g.pauseTimer -= dt;
-      // slight idle wobble
       const t=performance.now()*0.001;
       g.dirX = lerp(g.dirX, Math.cos(t*1.2), clamp(2.5*dt,0,1));
       g.dirY = lerp(g.dirY, Math.sin(t*1.2), clamp(2.5*dt,0,1));
+
       const targetAng = Math.atan2(g.dirY, g.dirX);
       let da = targetAng - g.facingAngle;
       da = Math.atan2(Math.sin(da), Math.cos(da));
@@ -722,6 +740,7 @@
       if(g.pauseTimer<=0) g.state="PATROL";
       return;
     }
+
     const wp=g.waypoints[g.wpIndex];
     const reached=moveTowards(g, wp.x, wp.y, GUARD_CFG.patrolSpeed, dt);
     resolveCircleVsMap(g);
@@ -753,6 +772,7 @@
         const t=performance.now()*0.001;
         g.dirX = lerp(g.dirX, Math.cos(t*1.8), clamp(2.0*dt,0,1));
         g.dirY = lerp(g.dirY, Math.sin(t*1.8), clamp(2.0*dt,0,1));
+
         const targetAng = Math.atan2(g.dirY, g.dirX);
         let da = targetAng - g.facingAngle;
         da = Math.atan2(Math.sin(da), Math.cos(da));
@@ -763,7 +783,6 @@
     } else updateGuardPatrol(g, dt);
   }
 
-  // corridor-following patrol route builder
   function neighborsFloor(tx,ty){
     const dirs=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
     const res=[];
@@ -817,7 +836,6 @@
     return waypoints;
   }
 
-  // ========= gameplay update =========
   function updatePlayer(dt){
     const mv=getMoveVector();
     player.x += mv.x*player.speed*dt;
@@ -885,33 +903,6 @@
     if(player.score >= GAME_CFG.targetScore){ gameOver=true; win=true; gameState="END"; }
     else if(gameTime<=0){ gameOver=true; win=false; gameState="END"; }
     else if(player.hp<=0){ gameOver=true; win=false; gameState="END"; }
-  }
-
-  // ========= rendering =========
-  let floorImg, wallImg, titleImg, guardSprite;
-  let floorPattern=null;
-  const spySprites={}, gemSprites={}, gemCollectSprites={};
-
-  function beginWorldRender(){
-    if(!isMobile){ ctx.setTransform(1,0,0,1,0,0); return; }
-    const sx=canvas.width/WORLD_W, sy=canvas.height/WORLD_H;
-    ctx.setTransform(sx,0,0,sy,0,0);
-  }
-
-  function drawSpriteCentered(img,x,y,size){
-    if(!img) return;
-    ctx.drawImage(img, x-size/2, y-size/2, size, size);
-  }
-
-  // Rotate guard.png to face g.facingAngle
-  // Assumption: guard.png is drawn facing RIGHT (east). If yours faces UP, adjust by -Math.PI/2.
-  function drawRotatedSprite(img, x, y, size, angleRad) {
-    if (!img) return;
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(angleRad);
-    ctx.drawImage(img, -size/2, -size/2, size, size);
-    ctx.restore();
   }
 
   function drawTitleScreen(){
@@ -985,14 +976,11 @@
   }
 
   function drawGuard(g){
-    // Wall-occluded vision cone (Option A)
     drawOccludedCone(g);
 
-    // Guard sprite: rotate to facing direction
     if(guardSprite){
       drawRotatedSprite(guardSprite, g.x, g.y, SPRITE.drawSize, g.facingAngle);
     } else {
-      // fallback circle
       ctx.beginPath();
       ctx.fillStyle=(g.state==="CHASE") ? "#ff7b72" : "#c9d1d9";
       ctx.arc(g.x,g.y,g.radius,0,Math.PI*2);
@@ -1055,7 +1043,6 @@
     drawEndOverlay();
   }
 
-  // ========= HUD =========
   function updateHUD(){
     UI.target.textContent = String(GAME_CFG.targetScore);
 
@@ -1076,7 +1063,6 @@
     UI.hpBar.style.background=(player.hp<35) ? "#ff7b72" : "#2f81f7";
   }
 
-  // ========= restart =========
   function restart(){
     map = generatePacMap();
 
@@ -1145,7 +1131,11 @@
     else { gameState="PLAY"; restart(); }
   });
 
-  // ========= loop =========
+  let gameTime = GAME_CFG.timeLimit;
+  let gameOver = false;
+  let win = false;
+  let powerupSpawnTimer = 0;
+
   let lastT = performance.now();
   function tick(t){
     const dt=clamp((t-lastT)/1000,0,0.033);
@@ -1167,11 +1157,9 @@
     requestAnimationFrame(tick);
   }
 
-  // ========= boot =========
   async function boot(){
     sizeCanvasForDevice();
 
-    // Required assets list (if any fail, we show exactly which)
     const required = [
       ASSETS.floor, ASSETS.wall, ASSETS.title,
       ...Object.values(SPY_FILES),
