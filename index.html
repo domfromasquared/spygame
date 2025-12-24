@@ -162,6 +162,13 @@
     rayStep: 6,
   };
 
+  // NEW: suspicion ramp (noticed -> spotted -> chase)
+  const ALERT_CFG = {
+    rise: 0.9,     // suspicion per second when seen
+    decay: 0.6,    // suspicion per second when not seen
+    spottedAt: 1.0 // threshold for CHASE
+  };
+
   const POWERUP_CFG = {
     spawnInterval: 2.8,
     maxOnMap: 3,
@@ -411,7 +418,9 @@
     const q=[{x:sx,y:sy}];
     const vis=Array.from({length:MAP_H},()=>Array(MAP_W).fill(false));
     vis[sy][sx]=true; let reached=1;
-    const dirs=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:0-1}];
+
+    // FIX: typo cleanup (was y:0-1)
+    const dirs=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
 
     while(q.length){
       const p=q.shift();
@@ -589,6 +598,12 @@
   let floorPattern=null;
   const spySprites={}, gemSprites={}, gemCollectSprites={};
 
+  // NEW: cache guard vision results per frame (avoid double LOS checks)
+  let guardSeesPlayer = [];
+
+  // entities / runtime vars
+  let player, guards, powerups, floaters, collectBursts, REACH;
+
   function beginWorldRender(){
     if(!isMobile){ ctx.setTransform(1,0,0,1,0,0); return; }
     const sx=canvas.width/WORLD_W, sy=canvas.height/WORLD_H;
@@ -658,6 +673,7 @@
       stuckTime:0,
       lastX:x, lastY:y,
       facingAngle: 0,
+      suspicion: 0, // NEW
     };
   }
 
@@ -748,13 +764,22 @@
     if(reached) stepPatrolIndex(g);
   }
 
-  function updateGuard(g, dt){
-    const sees=canGuardSeePlayer(g);
+  // UPDATED: uses cached vision boolean
+  function updateGuard(g, dt, sees){
+    // Suspicion ramp
+    if(sees) g.suspicion = clamp(g.suspicion + ALERT_CFG.rise*dt, 0, 1);
+    else     g.suspicion = clamp(g.suspicion - ALERT_CFG.decay*dt, 0, 1);
+
+    const fullySpotted = g.suspicion >= ALERT_CFG.spottedAt;
+
+    // Update last seen info when seen (even if not fully spotted yet)
     if(sees){
       g.lastSeenX=player.x; g.lastSeenY=player.y;
       g.timeSinceSeen=0;
-      if(g.state!=="CHASE") g.state="CHASE";
-    } else g.timeSinceSeen += dt;
+      if(fullySpotted && g.state!=="CHASE") g.state="CHASE";
+    } else {
+      g.timeSinceSeen += dt;
+    }
 
     if(g.state==="CHASE"){
       moveTowards(g, g.lastSeenX, g.lastSeenY, GUARD_CFG.chaseSpeed, dt);
@@ -883,9 +908,10 @@
     }
   }
 
-  function updateDamage(dt){
-    let seen=false;
-    for(const g of guards){ if(canGuardSeePlayer(g)){ seen=true; break; } }
+  // UPDATED: uses cached vision results
+  function updateDamage(dt, seesArr){
+    const seen = seesArr?.some(Boolean) ?? false;
+
     if(seen){
       player.coneContact += dt;
       if(player.coneContact >= PLAYER_CFG.damageGrace){
@@ -977,6 +1003,18 @@
 
   function drawGuard(g){
     drawOccludedCone(g);
+
+    // NEW: suspicion ring so you can read "noticed -> spotted"
+    if (g.suspicion > 0.01) {
+      ctx.save();
+      ctx.globalAlpha = 0.9;
+      ctx.strokeStyle = (g.suspicion >= 1) ? "#ff7b72" : "#79c0ff";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(g.x, g.y, 18, -Math.PI/2, -Math.PI/2 + g.suspicion * Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
 
     if(guardSprite){
       drawRotatedSprite(guardSprite, g.x, g.y, SPRITE.drawSize, g.facingAngle);
@@ -1112,6 +1150,9 @@
       used.push({x:g.x,y:g.y});
     }
 
+    // NEW: init vision cache array
+    guardSeesPlayer = new Array(guards.length).fill(false);
+
     powerups = [];
     floaters = [];
     collectBursts = [];
@@ -1143,12 +1184,22 @@
 
     if(gameState==="PLAY" && !gameOver){
       gameTime -= dt;
+
       updatePlayer(dt);
-      for(const g of guards) updateGuard(g,dt);
+
+      // NEW: compute visibility once per frame
+      guardSeesPlayer = guards.map(g => canGuardSeePlayer(g));
+
+      // NEW: update guards using cached vision
+      guards.forEach((g, i) => updateGuard(g, dt, guardSeesPlayer[i]));
+
       updatePowerups(dt);
       updateCollectBursts(dt);
       updateFloaters(dt);
-      updateDamage(dt);
+
+      // NEW: apply damage using cached vision
+      updateDamage(dt, guardSeesPlayer);
+
       checkEndConditions();
     }
 
