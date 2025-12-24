@@ -162,7 +162,7 @@
     rayStep: 6,
   };
 
-  // NEW: suspicion ramp (noticed -> spotted -> chase)
+  // suspicion ramp (noticed -> spotted -> chase)
   const ALERT_CFG = {
     rise: 0.9,     // suspicion per second when seen
     decay: 0.6,    // suspicion per second when not seen
@@ -188,18 +188,20 @@
     guard: "assets/guard.png", // optional
   };
 
-  // FIXED: diagonals were backwards (plus your N/S are swapped in art)
+  // NOTE:
+  // Your N/S appear swapped in art (kept as you had it),
+  // but diagonals were backwards. FIX: swap opposite diagonal pairs (NE<->SW, NW<->SE).
   const SPY_FILES = {
     n:  "assets/spys.png",
     e:  "assets/spye.png",
     s:  "assets/spyn.png",
     w:  "assets/spyw.png",
 
-    // diagonals corrected:
-    ne: "assets/spysw.png",
-    nw: "assets/spyse.png",
-    se: "assets/spynw.png",
-    sw: "assets/spyne.png",
+    // FIXED diagonals (were backwards):
+    ne: "assets/spyne.png",
+    nw: "assets/spynw.png",
+    se: "assets/spyse.png",
+    sw: "assets/spysw.png",
   };
 
   const GEM_FILES = {
@@ -598,7 +600,7 @@
   let floorPattern=null;
   const spySprites={}, gemSprites={}, gemCollectSprites={};
 
-  // NEW: cache guard vision results per frame (avoid double LOS checks)
+  // cache guard vision results per frame (avoid double LOS checks)
   let guardSeesPlayer = [];
 
   // entities / runtime vars
@@ -673,7 +675,7 @@
       stuckTime:0,
       lastX:x, lastY:y,
       facingAngle: 0,
-      suspicion: 0, // NEW
+      suspicion: 0,
     };
   }
 
@@ -764,15 +766,12 @@
     if(reached) stepPatrolIndex(g);
   }
 
-  // UPDATED: uses cached vision boolean
   function updateGuard(g, dt, sees){
-    // Suspicion ramp
     if(sees) g.suspicion = clamp(g.suspicion + ALERT_CFG.rise*dt, 0, 1);
     else     g.suspicion = clamp(g.suspicion - ALERT_CFG.decay*dt, 0, 1);
 
     const fullySpotted = g.suspicion >= ALERT_CFG.spottedAt;
 
-    // Update last seen info when seen (even if not fully spotted yet)
     if(sees){
       g.lastSeenX=player.x; g.lastSeenY=player.y;
       g.timeSinceSeen=0;
@@ -908,7 +907,6 @@
     }
   }
 
-  // UPDATED: uses cached vision results
   function updateDamage(dt, seesArr){
     const seen = seesArr?.some(Boolean) ?? false;
 
@@ -1004,7 +1002,7 @@
   function drawGuard(g){
     drawOccludedCone(g);
 
-    // NEW: suspicion ring so you can read "noticed -> spotted"
+    // suspicion ring
     if (g.suspicion > 0.01) {
       ctx.save();
       ctx.globalAlpha = 0.9;
@@ -1150,7 +1148,6 @@
       used.push({x:g.x,y:g.y});
     }
 
-    // NEW: init vision cache array
     guardSeesPlayer = new Array(guards.length).fill(false);
 
     powerups = [];
@@ -1187,17 +1184,13 @@
 
       updatePlayer(dt);
 
-      // NEW: compute visibility once per frame
       guardSeesPlayer = guards.map(g => canGuardSeePlayer(g));
-
-      // NEW: update guards using cached vision
       guards.forEach((g, i) => updateGuard(g, dt, guardSeesPlayer[i]));
 
       updatePowerups(dt);
       updateCollectBursts(dt);
       updateFloaters(dt);
 
-      // NEW: apply damage using cached vision
       updateDamage(dt, guardSeesPlayer);
 
       checkEndConditions();
